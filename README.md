@@ -181,3 +181,10 @@ Hook deployment failures are caused by incorrect flags or incorrect salt mining
 - [v4-periphery](https://github.com/uniswap/v4-periphery)
 - [v4-core](https://github.com/uniswap/v4-core)
 - [v4-by-example](https://v4-by-example.org)
+
+## SteadyLP
+
+SteadyLP is a Uniswap v4 hook that protects long-term LPs from impermanent loss and concentrated liquidity attacks.
+It smooths real swap fees over time and directs part of the value into a shared protection reserve.
+When LPs face toxic flow, sudden price moves, or short-term JIT liquidity attacks, the hook can reduce abuse and partially compensate eligible long-term LPs.
+No fixed APY. No fake yield. No speculative hedging. Just real fees, transparent rules, and safer liquidity.
