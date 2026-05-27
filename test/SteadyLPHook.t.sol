@@ -40,6 +40,8 @@ contract SteadyLPHookTest is BaseTest {
     uint24 internal constant SMOOTHING_SHARE_BPS = 6_000;
     uint256 internal constant LARGE_SWAP_THRESHOLD = 5 ether;
     uint24 internal constant PRICE_MOVE_TICK_THRESHOLD = 120;
+    uint32 internal constant COMPENSATION_LOOKBACK = 1 hours;
+    uint16 internal constant ORACLE_CARDINALITY = 16;
 
     Currency internal currency0;
     Currency internal currency1;
@@ -82,6 +84,8 @@ contract SteadyLPHookTest is BaseTest {
             smoothingShareBps: SMOOTHING_SHARE_BPS,
             largeSwapThreshold: LARGE_SWAP_THRESHOLD,
             priceMoveTickThreshold: PRICE_MOVE_TICK_THRESHOLD,
+            compensationLookback: COMPENSATION_LOOKBACK,
+            oracleCardinality: ORACLE_CARDINALITY,
             payoutToken0: true
         });
 
@@ -303,6 +307,44 @@ contract SteadyLPHookTest is BaseTest {
         assertEq(balanceAfter - balanceBefore, 50 ether);
 
         assertEq(hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt(), 100 ether), 30 ether);
+    }
+
+    function testOracleCompensationIsReservedOnRemoveAndClaimedDirectly() public {
+        hook.depositReserve(poolKey, 100 ether);
+
+        swapRouter.swapExactTokensForTokens({
+            amountIn: LARGE_SWAP_THRESHOLD,
+            amountOutMin: 0,
+            zeroForOne: true,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+
+        vm.roll(block.number + RISK_MODE_BLOCKS + 1);
+        vm.warp(block.timestamp + MIN_HOLDING_PERIOD + COMPENSATION_LOOKBACK + 1);
+
+        uint256 reserveBefore = hook.getReserveState(poolKey).balance;
+        positionManager.decreaseLiquidity(
+            tokenId,
+            10e18,
+            0,
+            0,
+            address(this),
+            block.timestamp,
+            hookData
+        );
+
+        uint256 pending = hook.previewPendingCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt());
+        assertGt(pending, 0);
+
+        uint256 balanceBefore = token0.balanceOf(address(this));
+        hook.claimPendingCompensation(poolKey, tickLower, tickUpper, _positionSalt(), address(this));
+        uint256 balanceAfter = token0.balanceOf(address(this));
+
+        assertEq(balanceAfter - balanceBefore, pending);
+        assertLt(hook.getReserveState(poolKey).balance, reserveBefore);
     }
 
     function testNoFixedApyOrGuaranteedYieldLogicExists() public {

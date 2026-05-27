@@ -28,6 +28,8 @@ contract DeploySteadyLPHookScript is BaseScript {
             smoothingShareBps: 6_000,
             largeSwapThreshold: 5 ether,
             priceMoveTickThreshold: 120,
+            compensationLookback: 1 hours,
+            oracleCardinality: 16,
             payoutToken0: true
         });
 

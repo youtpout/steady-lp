@@ -2,12 +2,16 @@
 pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 import {CurrencySettler} from "@openzeppelin/uniswap-hooks/src/utils/CurrencySettler.sol";
 
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
+import {SqrtPriceMath} from "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -18,7 +22,7 @@ import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/Pool
 
 /// @title SteadyLPHook
 /// @notice Uniswap v4 hook that smooths real inflows, maintains a shared reserve, and reduces short-term LP abuse.
-contract SteadyLPHook is BaseHook {
+contract SteadyLPHook is BaseHook, ReentrancyGuard {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
     using LPFeeLibrary for uint24;
@@ -26,6 +30,8 @@ contract SteadyLPHook is BaseHook {
 
     uint256 private constant Q128 = 1 << 128;
     uint256 private constant BPS_DENOMINATOR = 10_000;
+    uint256 private constant Q96 = 0x1000000000000000000000000;
+    uint16 private constant ORACLE_BUFFER_SIZE = 64;
 
     error InvalidConfig();
     error UnsupportedPayoutCurrency();
@@ -35,6 +41,7 @@ contract SteadyLPHook is BaseHook {
     error MinimumHoldNotMet();
     error NothingToClaim();
     error NoCompensationAvailable();
+    error OracleNotReady();
     error TransferFailed();
 
     /// @notice Configuration shared by all pools that use this hook.
@@ -51,6 +58,8 @@ contract SteadyLPHook is BaseHook {
         uint24 smoothingShareBps;
         uint256 largeSwapThreshold;
         uint24 priceMoveTickThreshold;
+        uint32 compensationLookback;
+        uint16 oracleCardinality;
         bool payoutToken0;
     }
 
@@ -74,8 +83,23 @@ contract SteadyLPHook is BaseHook {
     /// @notice Shared protection reserve state per pool.
     struct ReserveState {
         uint256 balance;
+        uint256 lockedBalance;
         uint256 totalInflow;
         uint256 totalPaid;
+    }
+
+    struct OracleObservation {
+        uint32 blockTimestamp;
+        int56 tickCumulative;
+        int24 tick;
+        bool initialized;
+    }
+
+    struct OracleState {
+        uint16 index;
+        uint16 cardinality;
+        uint16 cardinalityNext;
+        bool initialized;
     }
 
     /// @notice Per-position metadata tracked by the hook.
@@ -90,6 +114,10 @@ contract SteadyLPHook is BaseHook {
         uint256 rewardDebtX128;
         uint256 accruedClaimable;
         uint256 claimedAmount;
+        uint256 depositedAmount0;
+        uint256 depositedAmount1;
+        uint256 pendingCompensation;
+        uint256 claimedCompensation;
         bool riskyRange;
         bool protectionEligible;
     }
@@ -120,12 +148,16 @@ contract SteadyLPHook is BaseHook {
         uint256 reserveShare,
         uint256 smoothingShare
     );
+    event OracleObservationRecorded(PoolId indexed poolId, uint16 index, uint32 timestamp, int56 tickCumulative, int24 tick);
+    event CompensationReserved(PoolId indexed poolId, bytes32 indexed positionId, uint256 lossValue, uint256 compensation);
 
     PoolConfig public defaultPoolConfig;
 
     mapping(PoolId => PoolState) internal _poolStates;
     mapping(PoolId => ReserveState) internal _reserveStates;
     mapping(bytes32 => PositionInfo) internal _positions;
+    mapping(PoolId => OracleObservation[ORACLE_BUFFER_SIZE]) internal _oracleObservations;
+    mapping(PoolId => OracleState) internal _oracleStates;
 
     constructor(IPoolManager _poolManager, PoolConfig memory _defaultPoolConfig) BaseHook(_poolManager) {
         if (
@@ -134,6 +166,9 @@ contract SteadyLPHook is BaseHook {
                 || _defaultPoolConfig.baseDynamicFee > _defaultPoolConfig.riskDynamicFee
                 || _defaultPoolConfig.riskDynamicFee > LPFeeLibrary.MAX_LP_FEE
                 || _defaultPoolConfig.swapHookFeeBps > BPS_DENOMINATOR
+                || _defaultPoolConfig.compensationLookback == 0
+                || _defaultPoolConfig.oracleCardinality == 0
+                || _defaultPoolConfig.oracleCardinality > ORACLE_BUFFER_SIZE
                 || _defaultPoolConfig.reserveShareBps + _defaultPoolConfig.smoothingShareBps != BPS_DENOMINATOR
         ) revert InvalidConfig();
 
@@ -265,7 +300,7 @@ contract SteadyLPHook is BaseHook {
         if (block.timestamp < position.addedAt + defaultPoolConfig.minHoldingPeriod) return 0;
 
         uint256 cappedByPolicy = lossAmount * defaultPoolConfig.maxCoverageBps / BPS_DENOMINATOR;
-        uint256 reserveBalance = _reserveStates[poolId].balance;
+        uint256 reserveBalance = _availableReserve(poolId);
         return cappedByPolicy < reserveBalance ? cappedByPolicy : reserveBalance;
     }
 
@@ -297,6 +332,35 @@ contract SteadyLPHook is BaseHook {
 
         _transferPayoutToken(key, recipient, compensation);
         emit CompensationPaid(poolId, positionId, recipient, lossAmount, compensation);
+    }
+
+    /// @notice Claims compensation that was reserved during a prior liquidity removal.
+    function claimPendingCompensation(
+        PoolKey calldata key,
+        int24 tickLower,
+        int24 tickUpper,
+        bytes32 salt,
+        address recipient
+    ) external nonReentrant returns (uint256 compensation) {
+        PoolId poolId = key.toId();
+        bytes32 positionId = _positionKey(poolId, msg.sender, tickLower, tickUpper, salt);
+        PositionInfo storage position = _positions[positionId];
+        if (position.operator == address(0)) revert PositionNotFound();
+        if (position.operator != msg.sender) revert NotPositionOperator();
+
+        compensation = position.pendingCompensation;
+        if (compensation == 0) revert NoCompensationAvailable();
+
+        position.pendingCompensation = 0;
+        position.claimedCompensation += compensation;
+
+        ReserveState storage reserve = _reserveStates[poolId];
+        reserve.lockedBalance -= compensation;
+        reserve.balance -= compensation;
+        reserve.totalPaid += compensation;
+
+        _transferPayoutToken(key, recipient, compensation);
+        emit CompensationPaid(poolId, positionId, recipient, compensation, compensation);
     }
 
     /// @notice Returns whether risk mode is currently active for a pool.
@@ -349,6 +413,48 @@ contract SteadyLPHook is BaseHook {
         return _reserveStates[key.toId()];
     }
 
+    /// @notice Returns the current oracle state for a pool.
+    function getOracleState(PoolKey calldata key) external view returns (OracleState memory) {
+        return _oracleStates[key.toId()];
+    }
+
+    /// @notice Returns a single oracle observation for a pool.
+    function getOracleObservation(PoolKey calldata key, uint256 index) external view returns (OracleObservation memory) {
+        return _oracleObservations[key.toId()][index];
+    }
+
+    /// @notice Returns the pending compensation already reserved for a position after liquidity removal.
+    function previewPendingCompensation(
+        PoolKey calldata key,
+        address operator,
+        int24 tickLower,
+        int24 tickUpper,
+        bytes32 salt
+    ) external view returns (uint256) {
+        return _positions[_positionKey(key.toId(), operator, tickLower, tickUpper, salt)].pendingCompensation;
+    }
+
+    /// @notice Returns the current oracle-based compensation preview for a portion of a position.
+    function previewOracleCompensation(
+        PoolKey calldata key,
+        address operator,
+        int24 tickLower,
+        int24 tickUpper,
+        bytes32 salt,
+        uint128 liquidityToRemove
+    ) external view returns (uint256 compensation, uint256 lossValue, uint160 twapSqrtPriceX96) {
+        PoolId poolId = key.toId();
+        bytes32 positionId = _positionKey(poolId, operator, tickLower, tickUpper, salt);
+        PositionInfo storage position = _positions[positionId];
+        if (position.operator == address(0) || liquidityToRemove == 0 || liquidityToRemove > position.liquidity) {
+            return (0, 0, 0);
+        }
+
+        twapSqrtPriceX96 = _consultSqrtPriceX96(poolId, defaultPoolConfig.compensationLookback);
+        lossValue = _lossValueForLiquiditySlice(key, position, liquidityToRemove, twapSqrtPriceX96);
+        compensation = _capCompensation(poolId, lossValue);
+    }
+
     /// @notice Returns the fee that would be applied on the next swap if the pool uses dynamic fees.
     /// @param key Pool key.
     function previewDynamicFee(PoolKey calldata key) external view returns (uint24) {
@@ -364,6 +470,7 @@ contract SteadyLPHook is BaseHook {
         PoolId poolId = key.toId();
         _settlePoolRelease(poolId);
         _expireRiskModeIfNeeded(poolId);
+        _recordOracleObservation(poolId, _currentTick(poolId));
         _recordAddedLiquidity(poolId, key, params, feesAccrued, _decodeOperator(sender, hookData));
 
         return (BaseHook.afterAddLiquidity.selector, BalanceDelta.wrap(0));
@@ -377,6 +484,7 @@ contract SteadyLPHook is BaseHook {
         PoolId poolId = key.toId();
         _settlePoolRelease(poolId);
         _expireRiskModeIfNeeded(poolId);
+        _recordOracleObservation(poolId, _currentTick(poolId));
 
         address operator = _decodeOperator(sender, hookData);
         bytes32 positionId = _positionKey(poolId, operator, params.tickLower, params.tickUpper, params.salt);
@@ -396,7 +504,12 @@ contract SteadyLPHook is BaseHook {
         uint256 removing = uint256(-params.liquidityDelta);
         if (removing > position.liquidity) revert InvalidConfig();
 
+        if (position.protectionEligible && !_isRiskModeActive(poolId)) {
+            _reserveOracleCompensation(poolId, key, positionId, position, uint128(removing));
+        }
+
         uint128 newLiquidity = uint128(uint256(position.liquidity) - removing);
+        _reducePositionDeposits(position, removing);
         position.liquidity = newLiquidity;
         position.rewardDebtX128 = uint256(newLiquidity) * _poolStates[poolId].rewardPerLiquidityX128;
         _poolStates[poolId].totalTrackedLiquidity -= uint128(removing);
@@ -445,6 +558,7 @@ contract SteadyLPHook is BaseHook {
         }
 
         state.lastObservedTick = newTick;
+        _recordOracleObservation(poolId, newTick);
 
         int128 hookFeeDelta = _captureSwapFeeFromDelta(poolId, key, sender, params, delta);
         return (BaseHook.afterSwap.selector, hookFeeDelta);
@@ -481,12 +595,16 @@ contract SteadyLPHook is BaseHook {
         }
 
         uint128 addedLiquidity = uint128(uint256(params.liquidityDelta));
+        (uint256 addedAmount0, uint256 addedAmount1) =
+            _positionAmountsForLiquidity(params.tickLower, params.tickUpper, addedLiquidity, _currentSqrtPriceX96(poolId));
         position.operator = operator;
         position.tickLower = params.tickLower;
         position.tickUpper = params.tickUpper;
         position.addedAt = uint40(block.timestamp);
         position.addedAtBlock = uint40(block.number);
         position.liquidity += addedLiquidity;
+        position.depositedAmount0 += addedAmount0;
+        position.depositedAmount1 += addedAmount1;
         position.rewardDebtX128 = uint256(position.liquidity) * _poolStates[poolId].rewardPerLiquidityX128;
 
         bool riskyRange = _isRiskyRange(key, params.tickLower, params.tickUpper);
@@ -663,6 +781,214 @@ contract SteadyLPHook is BaseHook {
         bool unspecifiedIsCurrency1 = params.amountSpecified < 0 == params.zeroForOne;
         unspecifiedCurrency = unspecifiedIsCurrency1 ? key.currency1 : key.currency0;
         unspecifiedAmount = unspecifiedIsCurrency1 ? _absolute(int256(delta.amount1())) : _absolute(int256(delta.amount0()));
+    }
+
+    function _reserveOracleCompensation(
+        PoolId poolId,
+        PoolKey calldata key,
+        bytes32 positionId,
+        PositionInfo storage position,
+        uint128 liquidityToRemove
+    ) internal {
+        uint160 twapSqrtPriceX96 = _consultSqrtPriceX96(poolId, defaultPoolConfig.compensationLookback);
+        uint256 lossValue = _lossValueForLiquiditySlice(key, position, liquidityToRemove, twapSqrtPriceX96);
+        if (lossValue == 0) return;
+
+        uint256 compensation = _capCompensation(poolId, lossValue);
+        if (compensation == 0) return;
+
+        PositionInfo storage storedPosition = _positions[positionId];
+        storedPosition.pendingCompensation += compensation;
+
+        ReserveState storage reserve = _reserveStates[poolId];
+        reserve.lockedBalance += compensation;
+
+        emit CompensationReserved(poolId, positionId, lossValue, compensation);
+    }
+
+    function _lossValueForLiquiditySlice(
+        PoolKey calldata key,
+        PositionInfo storage position,
+        uint128 liquidityToRemove,
+        uint160 sqrtPriceX96
+    ) internal view returns (uint256 lossValue) {
+        uint256 heldAmount0 = position.depositedAmount0 * liquidityToRemove / position.liquidity;
+        uint256 heldAmount1 = position.depositedAmount1 * liquidityToRemove / position.liquidity;
+        (uint256 positionAmount0, uint256 positionAmount1) =
+            _positionAmountsForLiquidity(position.tickLower, position.tickUpper, liquidityToRemove, sqrtPriceX96);
+
+        uint256 holdValue = _valueInPayoutToken(key, heldAmount0, heldAmount1, sqrtPriceX96);
+        uint256 lpValue = _valueInPayoutToken(key, positionAmount0, positionAmount1, sqrtPriceX96);
+
+        if (holdValue > lpValue) {
+            lossValue = holdValue - lpValue;
+        }
+    }
+
+    function _capCompensation(PoolId poolId, uint256 lossValue) internal view returns (uint256) {
+        uint256 cappedByPolicy = lossValue * defaultPoolConfig.maxCoverageBps / BPS_DENOMINATOR;
+        uint256 reserveAvailable = _availableReserve(poolId);
+        return cappedByPolicy < reserveAvailable ? cappedByPolicy : reserveAvailable;
+    }
+
+    function _reducePositionDeposits(PositionInfo storage position, uint256 removedLiquidity) internal {
+        uint256 previousLiquidity = uint256(position.liquidity);
+        if (previousLiquidity == 0) return;
+
+        uint256 removedAmount0 = position.depositedAmount0 * removedLiquidity / previousLiquidity;
+        uint256 removedAmount1 = position.depositedAmount1 * removedLiquidity / previousLiquidity;
+        position.depositedAmount0 -= removedAmount0;
+        position.depositedAmount1 -= removedAmount1;
+    }
+
+    function _positionAmountsForLiquidity(int24 tickLower, int24 tickUpper, uint128 liquidity, uint160 sqrtPriceX96)
+        internal
+        pure
+        returns (uint256 amount0, uint256 amount1)
+    {
+        uint160 sqrtPriceLowerX96 = TickMath.getSqrtPriceAtTick(tickLower);
+        uint160 sqrtPriceUpperX96 = TickMath.getSqrtPriceAtTick(tickUpper);
+
+        if (sqrtPriceX96 <= sqrtPriceLowerX96) {
+            amount0 = SqrtPriceMath.getAmount0Delta(sqrtPriceLowerX96, sqrtPriceUpperX96, liquidity, false);
+        } else if (sqrtPriceX96 < sqrtPriceUpperX96) {
+            amount0 = SqrtPriceMath.getAmount0Delta(sqrtPriceX96, sqrtPriceUpperX96, liquidity, false);
+            amount1 = SqrtPriceMath.getAmount1Delta(sqrtPriceLowerX96, sqrtPriceX96, liquidity, false);
+        } else {
+            amount1 = SqrtPriceMath.getAmount1Delta(sqrtPriceLowerX96, sqrtPriceUpperX96, liquidity, false);
+        }
+    }
+
+    function _valueInPayoutToken(PoolKey calldata key, uint256 amount0, uint256 amount1, uint160 sqrtPriceX96)
+        internal
+        view
+        returns (uint256)
+    {
+        if (defaultPoolConfig.payoutToken0) {
+            return amount0 + _quoteToken1InToken0(amount1, sqrtPriceX96);
+        }
+        key;
+        return amount1 + _quoteToken0InToken1(amount0, sqrtPriceX96);
+    }
+
+    function _quoteToken1InToken0(uint256 amount1, uint160 sqrtPriceX96) internal pure returns (uint256) {
+        if (amount1 == 0) return 0;
+        uint256 intermediate = FullMath.mulDiv(amount1, Q96, sqrtPriceX96);
+        return FullMath.mulDiv(intermediate, Q96, sqrtPriceX96);
+    }
+
+    function _quoteToken0InToken1(uint256 amount0, uint160 sqrtPriceX96) internal pure returns (uint256) {
+        if (amount0 == 0) return 0;
+        uint256 intermediate = FullMath.mulDiv(amount0, sqrtPriceX96, Q96);
+        return FullMath.mulDiv(intermediate, sqrtPriceX96, Q96);
+    }
+
+    function _recordOracleObservation(PoolId poolId, int24 currentTick) internal {
+        OracleState storage state = _oracleStates[poolId];
+        OracleObservation[ORACLE_BUFFER_SIZE] storage observations = _oracleObservations[poolId];
+        uint32 timestamp = uint32(block.timestamp);
+
+        if (!state.initialized) {
+            observations[0] = OracleObservation({
+                blockTimestamp: timestamp,
+                tickCumulative: 0,
+                tick: currentTick,
+                initialized: true
+            });
+            state.index = 0;
+            state.cardinality = 1;
+            state.cardinalityNext = defaultPoolConfig.oracleCardinality;
+            state.initialized = true;
+            emit OracleObservationRecorded(poolId, 0, timestamp, 0, currentTick);
+            return;
+        }
+
+        OracleObservation memory last = observations[state.index];
+        if (last.blockTimestamp == timestamp) {
+            observations[state.index].tick = currentTick;
+            return;
+        }
+
+        int56 nextTickCumulative = last.tickCumulative + int56(last.tick) * int56(uint56(timestamp - last.blockTimestamp));
+        uint16 nextIndex = state.index + 1;
+        if (nextIndex == state.cardinalityNext) nextIndex = 0;
+
+        observations[nextIndex] = OracleObservation({
+            blockTimestamp: timestamp,
+            tickCumulative: nextTickCumulative,
+            tick: currentTick,
+            initialized: true
+        });
+        state.index = nextIndex;
+        if (state.cardinality < state.cardinalityNext) {
+            state.cardinality++;
+        }
+
+        emit OracleObservationRecorded(poolId, nextIndex, timestamp, nextTickCumulative, currentTick);
+    }
+
+    function _consultSqrtPriceX96(PoolId poolId, uint32 secondsAgo) internal view returns (uint160) {
+        OracleState storage state = _oracleStates[poolId];
+        if (!state.initialized || state.cardinality == 0) revert OracleNotReady();
+
+        uint32 nowTimestamp = uint32(block.timestamp);
+        if (secondsAgo == 0) {
+            return _currentSqrtPriceX96(poolId);
+        }
+        if (secondsAgo > nowTimestamp) revert OracleNotReady();
+
+        uint32 targetTimestamp = nowTimestamp - secondsAgo;
+        int56 currentCumulative = _currentTickCumulative(poolId, nowTimestamp);
+        OracleObservation memory beforeOrAt = _observationBeforeOrAt(poolId, targetTimestamp);
+        int56 pastCumulative = beforeOrAt.tickCumulative;
+
+        if (targetTimestamp > beforeOrAt.blockTimestamp) {
+            pastCumulative += int56(beforeOrAt.tick) * int56(uint56(targetTimestamp - beforeOrAt.blockTimestamp));
+        }
+
+        int24 averageTick = int24((currentCumulative - pastCumulative) / int56(uint56(secondsAgo)));
+        return TickMath.getSqrtPriceAtTick(averageTick);
+    }
+
+    function _currentTickCumulative(PoolId poolId, uint32 nowTimestamp) internal view returns (int56) {
+        OracleState storage state = _oracleStates[poolId];
+        OracleObservation memory last = _oracleObservations[poolId][state.index];
+        return last.tickCumulative + int56(last.tick) * int56(uint56(nowTimestamp - last.blockTimestamp));
+    }
+
+    function _observationBeforeOrAt(PoolId poolId, uint32 targetTimestamp)
+        internal
+        view
+        returns (OracleObservation memory candidate)
+    {
+        OracleState storage state = _oracleStates[poolId];
+        bool found;
+
+        for (uint256 i = 0; i < state.cardinality; ++i) {
+            OracleObservation memory observation = _oracleObservations[poolId][i];
+            if (!observation.initialized) continue;
+            if (observation.blockTimestamp <= targetTimestamp) {
+                if (!found || observation.blockTimestamp > candidate.blockTimestamp) {
+                    candidate = observation;
+                    found = true;
+                }
+            }
+        }
+
+        if (!found) revert OracleNotReady();
+    }
+
+    function _currentSqrtPriceX96(PoolId poolId) internal view returns (uint160 sqrtPriceX96) {
+        (sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
+    }
+
+    function _currentTick(PoolId poolId) internal view returns (int24 tick) {
+        (, tick,,) = poolManager.getSlot0(poolId);
+    }
+
+    function _availableReserve(PoolId poolId) internal view returns (uint256) {
+        ReserveState storage reserve = _reserveStates[poolId];
+        return reserve.balance - reserve.lockedBalance;
     }
 
     function _isRiskyRange(PoolKey calldata key, int24 tickLower, int24 tickUpper) internal view returns (bool) {
