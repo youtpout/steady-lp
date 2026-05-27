@@ -12,7 +12,7 @@ contract DeploySteadyLPHookScript is BaseScript {
     function run() public {
         uint160 flags = uint160(
             Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
-                | Hooks.AFTER_SWAP_FLAG
+                | Hooks.AFTER_SWAP_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
 
         SteadyLPHook.PoolConfig memory config = SteadyLPHook.PoolConfig({
@@ -23,6 +23,9 @@ contract DeploySteadyLPHookScript is BaseScript {
             maxCoverageBps: 5_000,
             baseDynamicFee: 3_000,
             riskDynamicFee: 9_000,
+            swapHookFeeBps: 1_000,
+            reserveShareBps: 4_000,
+            smoothingShareBps: 6_000,
             largeSwapThreshold: 5 ether,
             priceMoveTickThreshold: 120,
             payoutToken0: true

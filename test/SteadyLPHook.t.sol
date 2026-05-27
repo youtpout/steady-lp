@@ -35,6 +35,9 @@ contract SteadyLPHookTest is BaseTest {
     uint24 internal constant MAX_COVERAGE_BPS = 5_000;
     uint24 internal constant BASE_DYNAMIC_FEE = 3_000;
     uint24 internal constant RISK_DYNAMIC_FEE = 9_000;
+    uint24 internal constant SWAP_HOOK_FEE_BPS = 1_000;
+    uint24 internal constant RESERVE_SHARE_BPS = 4_000;
+    uint24 internal constant SMOOTHING_SHARE_BPS = 6_000;
     uint256 internal constant LARGE_SWAP_THRESHOLD = 5 ether;
     uint24 internal constant PRICE_MOVE_TICK_THRESHOLD = 120;
 
@@ -62,7 +65,7 @@ contract SteadyLPHookTest is BaseTest {
         address flags = address(
             uint160(
                 Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
-                    | Hooks.AFTER_SWAP_FLAG
+                    | Hooks.AFTER_SWAP_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
             ) ^ (0x5555 << 144)
         );
 
@@ -74,6 +77,9 @@ contract SteadyLPHookTest is BaseTest {
             maxCoverageBps: MAX_COVERAGE_BPS,
             baseDynamicFee: BASE_DYNAMIC_FEE,
             riskDynamicFee: RISK_DYNAMIC_FEE,
+            swapHookFeeBps: SWAP_HOOK_FEE_BPS,
+            reserveShareBps: RESERVE_SHARE_BPS,
+            smoothingShareBps: SMOOTHING_SHARE_BPS,
             largeSwapThreshold: LARGE_SWAP_THRESHOLD,
             priceMoveTickThreshold: PRICE_MOVE_TICK_THRESHOLD,
             payoutToken0: true
@@ -125,6 +131,7 @@ contract SteadyLPHookTest is BaseTest {
         assertTrue(permissions.beforeRemoveLiquidity);
         assertTrue(permissions.beforeSwap);
         assertTrue(permissions.afterSwap);
+        assertTrue(permissions.afterSwapReturnDelta);
         assertFalse(permissions.afterDonate);
     }
 
@@ -206,6 +213,29 @@ contract SteadyLPHookTest is BaseTest {
 
         assertTrue(hook.isRiskModeActive(poolKey));
         assertEq(hook.previewDynamicFee(poolKey), RISK_DYNAMIC_FEE | LPFeeLibrary.OVERRIDE_FEE_FLAG);
+    }
+
+    function testSwapFeeIsSplitBetweenReserveAndSmoothing() public {
+        uint256 reserveBefore = hook.getReserveState(poolKey).balance;
+
+        swapRouter.swapExactTokensForTokens({
+            amountIn: 1 ether,
+            amountOutMin: 0,
+            zeroForOne: false,
+            poolKey: poolKey,
+            hookData: Constants.ZERO_BYTES,
+            receiver: address(this),
+            deadline: block.timestamp + 1
+        });
+
+        SteadyLPHook.ReserveState memory reserve = hook.getReserveState(poolKey);
+        SteadyLPHook.PoolState memory state = hook.getPoolState(poolKey);
+
+        assertGt(reserve.balance, reserveBefore);
+        assertGt(state.smoothedTotal, 0);
+
+        vm.warp(block.timestamp + (SMOOTHING_PERIOD / 2));
+        assertGt(hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt()), 0);
     }
 
     function testRiskModeExpiresAfterConfiguredBlocks() public {

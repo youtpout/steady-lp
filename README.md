@@ -215,13 +215,16 @@ This is the current anti-short-term farming rule: fast exit is allowed, but prot
 4. Fee smoothing
 
 SteadyLP does not invent yield on its own.
-The smoothing bucket is funded explicitly through `depositFeeInflow(...)`, which transfers real ERC20 tokens into the hook.
-Those inflows are released linearly over `smoothingPeriod` and distributed through a `rewardPerLiquidityX128` accumulator.
+The smoothing bucket is now funded directly from swaps when the hook captures a configurable portion of the swap flow in the payout token.
+That captured amount is split automatically, with one share sent to the shared reserve and the other sent to smoothing.
+Manual top-ups through `depositFeeInflow(...)` are still available for testing, donations, or bootstrapping.
+Smoothed inflows are released linearly over `smoothingPeriod` and distributed through a `rewardPerLiquidityX128` accumulator.
 LPs can only claim the portion that has already been released with `claimReleasedFees(...)`, and can preview it with `previewClaimableFees(...)`.
 
 5. Shared protection reserve
 
-The shared reserve is funded explicitly through `depositReserve(...)`, again using real ERC20 deposits.
+The shared reserve is now funded directly from the swap fee captured by the hook, based on the configured split ratio.
+It can still be topped up manually through `depositReserve(...)`.
 Eligible LPs can preview and claim partial compensation with `previewCompensation(...)` and `claimCompensation(...)`.
 Compensation is capped by policy through `maxCoverageBps` and also capped by the actual reserve balance.
 The reserve never goes negative, and the hook never guarantees full loss coverage.
@@ -243,7 +246,7 @@ All payouts depend on real deposited value and explicit policy limits.
 8. Current MVP limits
 
 This version is intentionally simple and hackathon-ready.
-Fee smoothing is currently funded by explicit deposits instead of automatically diverting live pool fees.
+The hook currently captures a configurable extra swap fee in the payout token and splits it between reserve and smoothing, instead of reading and reallocating the pool's native LP fee accounting directly.
 Compensation currently uses a user-supplied `lossAmount` input, so it is not yet a full onchain impermanent-loss engine.
 The anti-JIT model is currently based on narrow-range detection, minimum-hold eligibility rules, and temporary risk mode rather than a more advanced scoring system.
-The payout token is selected by configuration through `payoutToken0`.
+The payout token is selected by configuration through `payoutToken0`, so only swaps that generate hook fees in that token feed the current reserve and smoothing path.

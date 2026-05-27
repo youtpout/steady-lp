@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
+import {CurrencySettler} from "@openzeppelin/uniswap-hooks/src/utils/CurrencySettler.sol";
 
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
@@ -21,6 +22,7 @@ contract SteadyLPHook is BaseHook {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
     using LPFeeLibrary for uint24;
+    using CurrencySettler for Currency;
 
     uint256 private constant Q128 = 1 << 128;
     uint256 private constant BPS_DENOMINATOR = 10_000;
@@ -44,6 +46,9 @@ contract SteadyLPHook is BaseHook {
         uint24 maxCoverageBps;
         uint24 baseDynamicFee;
         uint24 riskDynamicFee;
+        uint24 swapHookFeeBps;
+        uint24 reserveShareBps;
+        uint24 smoothingShareBps;
         uint256 largeSwapThreshold;
         uint24 priceMoveTickThreshold;
         bool payoutToken0;
@@ -107,6 +112,14 @@ contract SteadyLPHook is BaseHook {
     event RiskModeActivated(PoolId indexed poolId, uint40 indexed endsAtBlock, int24 tick, uint256 swapSize);
     event RiskModeExpired(PoolId indexed poolId);
     event PoolFeesObserved(PoolId indexed poolId, uint256 feeAmount0, uint256 feeAmount1);
+    event SwapFeeCaptured(
+        PoolId indexed poolId,
+        address indexed payer,
+        address indexed currency,
+        uint256 totalFee,
+        uint256 reserveShare,
+        uint256 smoothingShare
+    );
 
     PoolConfig public defaultPoolConfig;
 
@@ -120,6 +133,8 @@ contract SteadyLPHook is BaseHook {
                 || _defaultPoolConfig.riskModeBlocks == 0 || _defaultPoolConfig.maxCoverageBps > BPS_DENOMINATOR
                 || _defaultPoolConfig.baseDynamicFee > _defaultPoolConfig.riskDynamicFee
                 || _defaultPoolConfig.riskDynamicFee > LPFeeLibrary.MAX_LP_FEE
+                || _defaultPoolConfig.swapHookFeeBps > BPS_DENOMINATOR
+                || _defaultPoolConfig.reserveShareBps + _defaultPoolConfig.smoothingShareBps != BPS_DENOMINATOR
         ) revert InvalidConfig();
 
         defaultPoolConfig = _defaultPoolConfig;
@@ -139,7 +154,7 @@ contract SteadyLPHook is BaseHook {
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
-            afterSwapReturnDelta: false,
+            afterSwapReturnDelta: true,
             afterAddLiquidityReturnDelta: false,
             afterRemoveLiquidityReturnDelta: false
         });
@@ -153,16 +168,7 @@ contract SteadyLPHook is BaseHook {
         if (amount == 0) revert InvalidConfig();
 
         _transferPayoutTokenFrom(key, msg.sender, address(this), amount);
-        _settlePoolRelease(poolId);
-
-        PoolState storage state = _poolStates[poolId];
-        uint256 remaining = state.smoothedTotal - state.smoothedReleased;
-        state.smoothedTotal = remaining + amount;
-        state.smoothedReleased = 0;
-        state.smoothingStartedAt = uint40(block.timestamp);
-        state.lastReleaseAt = uint40(block.timestamp);
-
-        emit FeeInflowRecorded(poolId, msg.sender, amount, state.smoothedTotal);
+        _recordSmoothingInflow(poolId, msg.sender, amount);
     }
 
     /// @notice Deposits payout tokens into the shared protection reserve for a pool.
@@ -424,7 +430,7 @@ contract SteadyLPHook is BaseHook {
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, feeOverride);
     }
 
-    function _afterSwap(address, PoolKey calldata key, SwapParams calldata params, BalanceDelta, bytes calldata)
+    function _afterSwap(address sender, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata)
         internal
         override
         returns (bytes4, int128)
@@ -440,7 +446,8 @@ contract SteadyLPHook is BaseHook {
 
         state.lastObservedTick = newTick;
 
-        return (BaseHook.afterSwap.selector, 0);
+        int128 hookFeeDelta = _captureSwapFeeFromDelta(poolId, key, sender, params, delta);
+        return (BaseHook.afterSwap.selector, hookFeeDelta);
     }
 
     function _positionKey(PoolId poolId, address operator, int24 tickLower, int24 tickUpper, bytes32 salt)
@@ -529,6 +536,19 @@ contract SteadyLPHook is BaseHook {
         emit FeeReleaseRecorded(poolId, newlyReleased, state.rewardPerLiquidityX128);
     }
 
+    function _recordSmoothingInflow(PoolId poolId, address payer, uint256 amount) internal {
+        _settlePoolRelease(poolId);
+
+        PoolState storage state = _poolStates[poolId];
+        uint256 remaining = state.smoothedTotal - state.smoothedReleased;
+        state.smoothedTotal = remaining + amount;
+        state.smoothedReleased = 0;
+        state.smoothingStartedAt = uint40(block.timestamp);
+        state.lastReleaseAt = uint40(block.timestamp);
+
+        emit FeeInflowRecorded(poolId, payer, amount, state.smoothedTotal);
+    }
+
     function _previewRewardPerLiquidity(PoolId poolId) internal view returns (uint256 rewardPerLiquidityX128) {
         PoolState storage state = _poolStates[poolId];
         rewardPerLiquidityX128 = state.rewardPerLiquidityX128;
@@ -582,6 +602,69 @@ contract SteadyLPHook is BaseHook {
         emit PoolFeesObserved(poolId, fee0, fee1);
     }
 
+    function _captureSwapFeeFromDelta(
+        PoolId poolId,
+        PoolKey calldata key,
+        address payer,
+        SwapParams calldata params,
+        BalanceDelta delta
+    ) internal returns (int128) {
+        (Currency unspecifiedCurrency, uint256 unspecifiedAmount) = _unspecifiedSwapAmount(key, params, delta);
+        return _captureSwapFee(poolId, key, payer, unspecifiedCurrency, unspecifiedAmount);
+    }
+
+    function _captureSwapFee(
+        PoolId poolId,
+        PoolKey calldata key,
+        address payer,
+        Currency unspecifiedCurrency,
+        uint256 unspecifiedAmount
+    ) internal returns (int128) {
+        if (defaultPoolConfig.swapHookFeeBps == 0 || unspecifiedAmount == 0) return 0;
+        if (Currency.unwrap(unspecifiedCurrency) != Currency.unwrap(_payoutCurrency(key))) return 0;
+
+        uint256 feeAmount = unspecifiedAmount * defaultPoolConfig.swapHookFeeBps / BPS_DENOMINATOR;
+        if (feeAmount == 0) return 0;
+
+        unspecifiedCurrency.take(poolManager, address(this), feeAmount, true);
+        unspecifiedCurrency.settle(poolManager, address(this), feeAmount, true);
+        unspecifiedCurrency.take(poolManager, address(this), feeAmount, false);
+
+        uint256 reserveShare = feeAmount * defaultPoolConfig.reserveShareBps / BPS_DENOMINATOR;
+        uint256 smoothingShare = feeAmount - reserveShare;
+
+        ReserveState storage reserve = _reserveStates[poolId];
+        reserve.balance += reserveShare;
+        reserve.totalInflow += reserveShare;
+
+        if (smoothingShare > 0) {
+            _recordSmoothingInflow(poolId, payer, smoothingShare);
+        }
+        if (reserveShare > 0) {
+            emit ReserveInflowRecorded(poolId, payer, reserveShare, reserve.balance);
+        }
+        emit SwapFeeCaptured(
+            poolId,
+            payer,
+            Currency.unwrap(unspecifiedCurrency),
+            feeAmount,
+            reserveShare,
+            smoothingShare
+        );
+
+        return int128(uint128(feeAmount));
+    }
+
+    function _unspecifiedSwapAmount(PoolKey calldata key, SwapParams calldata params, BalanceDelta delta)
+        internal
+        pure
+        returns (Currency unspecifiedCurrency, uint256 unspecifiedAmount)
+    {
+        bool unspecifiedIsCurrency1 = params.amountSpecified < 0 == params.zeroForOne;
+        unspecifiedCurrency = unspecifiedIsCurrency1 ? key.currency1 : key.currency0;
+        unspecifiedAmount = unspecifiedIsCurrency1 ? _absolute(int256(delta.amount1())) : _absolute(int256(delta.amount0()));
+    }
+
     function _isRiskyRange(PoolKey calldata key, int24 tickLower, int24 tickUpper) internal view returns (bool) {
         (, int24 currentTick,,) = poolManager.getSlot0(key.toId());
         uint24 rangeWidth = uint24(uint24(tickUpper - tickLower));
@@ -622,17 +705,21 @@ contract SteadyLPHook is BaseHook {
     }
 
     function _transferPayoutTokenFrom(PoolKey calldata key, address from, address to, uint256 amount) internal {
-        Currency payoutCurrency = defaultPoolConfig.payoutToken0 ? key.currency0 : key.currency1;
+        Currency payoutCurrency = _payoutCurrency(key);
         address token = Currency.unwrap(payoutCurrency);
         if (token == address(0)) revert UnsupportedPayoutCurrency();
         if (!IERC20(token).transferFrom(from, to, amount)) revert TransferFailed();
     }
 
     function _transferPayoutToken(PoolKey calldata key, address to, uint256 amount) internal {
-        Currency payoutCurrency = defaultPoolConfig.payoutToken0 ? key.currency0 : key.currency1;
+        Currency payoutCurrency = _payoutCurrency(key);
         address token = Currency.unwrap(payoutCurrency);
         if (token == address(0)) revert UnsupportedPayoutCurrency();
         if (!IERC20(token).transfer(to, amount)) revert TransferFailed();
+    }
+
+    function _payoutCurrency(PoolKey calldata key) internal view returns (Currency) {
+        return defaultPoolConfig.payoutToken0 ? key.currency0 : key.currency1;
     }
 
     function _positiveAmount(int128 value) internal pure returns (uint256) {
