@@ -358,38 +358,7 @@ contract SteadyLPHook is BaseHook {
         PoolId poolId = key.toId();
         _settlePoolRelease(poolId);
         _expireRiskModeIfNeeded(poolId);
-
-        address operator = _decodeOperator(sender, hookData);
-        bytes32 positionId = _positionKey(poolId, operator, params.tickLower, params.tickUpper, params.salt);
-        PositionInfo storage position = _positions[positionId];
-
-        if (position.operator != address(0)) {
-            _accruePosition(positionId, poolId);
-        }
-
-        uint128 addedLiquidity = uint128(uint256(params.liquidityDelta));
-        position.operator = operator;
-        position.tickLower = params.tickLower;
-        position.tickUpper = params.tickUpper;
-        position.addedAt = uint40(block.timestamp);
-        position.addedAtBlock = uint40(block.number);
-        position.liquidity += addedLiquidity;
-        position.rewardDebtX128 = uint256(position.liquidity) * _poolStates[poolId].rewardPerLiquidityX128;
-
-        bool riskyRange = _isRiskyRange(key, params.tickLower, params.tickUpper);
-        position.riskyRange = riskyRange;
-        position.protectionEligible = !riskyRange;
-
-        _poolStates[poolId].totalTrackedLiquidity += addedLiquidity;
-        _observeFees(poolId, feesAccrued);
-
-        emit PositionRecorded(poolId, positionId, operator, position.liquidity, params.tickLower, params.tickUpper);
-        if (riskyRange) {
-            position.lastRiskBlock = uint40(block.number);
-            _poolStates[poolId].lastRiskBlock = uint40(block.number);
-            emit PositionRiskFlagged(poolId, positionId, operator, params.tickLower, params.tickUpper);
-        }
-        emit ProtectionEligibilityUpdated(poolId, positionId, position.protectionEligible);
+        _recordAddedLiquidity(poolId, key, params, feesAccrued, _decodeOperator(sender, hookData));
 
         return (BaseHook.afterAddLiquidity.selector, BalanceDelta.wrap(0));
     }
@@ -482,6 +451,45 @@ contract SteadyLPHook is BaseHook {
         }
         if (hookData.length != 32) revert UnsupportedHookData();
         return abi.decode(hookData, (address));
+    }
+
+    function _recordAddedLiquidity(
+        PoolId poolId,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata params,
+        BalanceDelta feesAccrued,
+        address operator
+    ) internal {
+        bytes32 positionId = _positionKey(poolId, operator, params.tickLower, params.tickUpper, params.salt);
+        PositionInfo storage position = _positions[positionId];
+
+        if (position.operator != address(0)) {
+            _accruePosition(positionId, poolId);
+        }
+
+        uint128 addedLiquidity = uint128(uint256(params.liquidityDelta));
+        position.operator = operator;
+        position.tickLower = params.tickLower;
+        position.tickUpper = params.tickUpper;
+        position.addedAt = uint40(block.timestamp);
+        position.addedAtBlock = uint40(block.number);
+        position.liquidity += addedLiquidity;
+        position.rewardDebtX128 = uint256(position.liquidity) * _poolStates[poolId].rewardPerLiquidityX128;
+
+        bool riskyRange = _isRiskyRange(key, params.tickLower, params.tickUpper);
+        position.riskyRange = riskyRange;
+        position.protectionEligible = !riskyRange;
+
+        _poolStates[poolId].totalTrackedLiquidity += addedLiquidity;
+        _observeFees(poolId, feesAccrued);
+
+        emit PositionRecorded(poolId, positionId, operator, position.liquidity, params.tickLower, params.tickUpper);
+        if (riskyRange) {
+            position.lastRiskBlock = uint40(block.number);
+            _poolStates[poolId].lastRiskBlock = uint40(block.number);
+            emit PositionRiskFlagged(poolId, positionId, operator, params.tickLower, params.tickUpper);
+        }
+        emit ProtectionEligibilityUpdated(poolId, positionId, position.protectionEligible);
     }
 
     function _settlePoolRelease(PoolId poolId) internal {
