@@ -60,18 +60,24 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         uint24 priceMoveTickThreshold;
         uint32 compensationLookback;
         uint16 oracleCardinality;
-        bool payoutToken0;
     }
 
     /// @notice Per-pool fee smoothing and risk state.
     struct PoolState {
-        uint256 smoothedTotal;
-        uint256 smoothedReleased;
-        uint40 smoothingStartedAt;
-        uint40 lastReleaseAt;
-        uint256 rewardPerLiquidityX128;
-        uint256 totalReleasedFees;
-        uint256 totalClaimedFees;
+        uint256 smoothedTotal0;
+        uint256 smoothedTotal1;
+        uint256 smoothedReleased0;
+        uint256 smoothedReleased1;
+        uint40 smoothingStartedAt0;
+        uint40 smoothingStartedAt1;
+        uint40 lastReleaseAt0;
+        uint40 lastReleaseAt1;
+        uint256 rewardPerLiquidity0X128;
+        uint256 rewardPerLiquidity1X128;
+        uint256 totalReleasedFees0;
+        uint256 totalReleasedFees1;
+        uint256 totalClaimedFees0;
+        uint256 totalClaimedFees1;
         uint128 totalTrackedLiquidity;
         uint40 riskModeEndsAtBlock;
         uint40 lastRiskBlock;
@@ -82,10 +88,14 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
 
     /// @notice Shared protection reserve state per pool.
     struct ReserveState {
-        uint256 balance;
-        uint256 lockedBalance;
-        uint256 totalInflow;
-        uint256 totalPaid;
+        uint256 balance0;
+        uint256 balance1;
+        uint256 lockedBalance0;
+        uint256 lockedBalance1;
+        uint256 totalInflow0;
+        uint256 totalInflow1;
+        uint256 totalPaid0;
+        uint256 totalPaid1;
     }
 
     struct OracleObservation {
@@ -111,22 +121,60 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         uint40 addedAt;
         uint40 addedAtBlock;
         uint40 lastRiskBlock;
-        uint256 rewardDebtX128;
-        uint256 accruedClaimable;
-        uint256 claimedAmount;
+        uint256 rewardDebt0X128;
+        uint256 rewardDebt1X128;
+        uint256 accruedClaimable0;
+        uint256 accruedClaimable1;
+        uint256 claimedAmount0;
+        uint256 claimedAmount1;
         uint256 depositedAmount0;
         uint256 depositedAmount1;
-        uint256 pendingCompensation;
-        uint256 claimedCompensation;
+        uint256 pendingCompensation0;
+        uint256 pendingCompensation1;
+        uint256 claimedCompensation0;
+        uint256 claimedCompensation1;
         bool riskyRange;
         bool protectionEligible;
     }
 
-    event FeeInflowRecorded(PoolId indexed poolId, address indexed payer, uint256 amount, uint256 smoothedTotal);
-    event FeeReleaseRecorded(PoolId indexed poolId, uint256 releasedAmount, uint256 rewardPerLiquidityX128);
-    event FeesClaimed(PoolId indexed poolId, bytes32 indexed positionId, address indexed recipient, uint256 amount);
-    event ReserveInflowRecorded(PoolId indexed poolId, address indexed payer, uint256 amount, uint256 reserveBalance);
-    event CompensationPaid(PoolId indexed poolId, bytes32 indexed positionId, address indexed recipient, uint256 lossAmount, uint256 compensation);
+    event FeeInflowRecorded(
+        PoolId indexed poolId,
+        address indexed payer,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 smoothedTotal0,
+        uint256 smoothedTotal1
+    );
+    event FeeReleaseRecorded(
+        PoolId indexed poolId,
+        uint256 releasedAmount0,
+        uint256 releasedAmount1,
+        uint256 rewardPerLiquidity0X128,
+        uint256 rewardPerLiquidity1X128
+    );
+    event FeesClaimed(
+        PoolId indexed poolId,
+        bytes32 indexed positionId,
+        address indexed recipient,
+        uint256 amount0,
+        uint256 amount1
+    );
+    event ReserveInflowRecorded(
+        PoolId indexed poolId,
+        address indexed payer,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 reserveBalance0,
+        uint256 reserveBalance1
+    );
+    event CompensationPaid(
+        PoolId indexed poolId,
+        bytes32 indexed positionId,
+        address indexed recipient,
+        uint256 lossValue,
+        uint256 compensation0,
+        uint256 compensation1
+    );
     event PositionRecorded(
         PoolId indexed poolId,
         bytes32 indexed positionId,
@@ -149,7 +197,13 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         uint256 smoothingShare
     );
     event OracleObservationRecorded(PoolId indexed poolId, uint16 index, uint32 timestamp, int56 tickCumulative, int24 tick);
-    event CompensationReserved(PoolId indexed poolId, bytes32 indexed positionId, uint256 lossValue, uint256 compensation);
+    event CompensationReserved(
+        PoolId indexed poolId,
+        bytes32 indexed positionId,
+        uint256 lossValue,
+        uint256 compensation0,
+        uint256 compensation1
+    );
 
     PoolConfig public defaultPoolConfig;
 
@@ -195,31 +249,40 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         });
     }
 
-    /// @notice Deposits payout tokens into the fee smoothing bucket for a pool.
+    /// @notice Deposits pool tokens into the fee smoothing bucket for a pool.
     /// @param key Pool key.
-    /// @param amount Amount of payout token to add.
-    function depositFeeInflow(PoolKey calldata key, uint256 amount) external {
+    /// @param amount0 Amount of token0 to add.
+    /// @param amount1 Amount of token1 to add.
+    function depositFeeInflow(PoolKey calldata key, uint256 amount0, uint256 amount1) external {
         PoolId poolId = key.toId();
-        if (amount == 0) revert InvalidConfig();
+        if (amount0 == 0 && amount1 == 0) revert InvalidConfig();
 
-        _transferPayoutTokenFrom(key, msg.sender, address(this), amount);
-        _recordSmoothingInflow(poolId, msg.sender, amount);
+        if (amount0 > 0) _transferPoolTokenFrom(key, true, msg.sender, address(this), amount0);
+        if (amount1 > 0) _transferPoolTokenFrom(key, false, msg.sender, address(this), amount1);
+        _recordSmoothingInflow(poolId, msg.sender, amount0, amount1);
     }
 
-    /// @notice Deposits payout tokens into the shared protection reserve for a pool.
+    /// @notice Deposits pool tokens into the shared protection reserve for a pool.
     /// @param key Pool key.
-    /// @param amount Amount of payout token to add.
-    function depositReserve(PoolKey calldata key, uint256 amount) external {
+    /// @param amount0 Amount of token0 to add.
+    /// @param amount1 Amount of token1 to add.
+    function depositReserve(PoolKey calldata key, uint256 amount0, uint256 amount1) external {
         PoolId poolId = key.toId();
-        if (amount == 0) revert InvalidConfig();
-
-        _transferPayoutTokenFrom(key, msg.sender, address(this), amount);
+        if (amount0 == 0 && amount1 == 0) revert InvalidConfig();
 
         ReserveState storage reserve = _reserveStates[poolId];
-        reserve.balance += amount;
-        reserve.totalInflow += amount;
+        if (amount0 > 0) {
+            _transferPoolTokenFrom(key, true, msg.sender, address(this), amount0);
+            reserve.balance0 += amount0;
+            reserve.totalInflow0 += amount0;
+        }
+        if (amount1 > 0) {
+            _transferPoolTokenFrom(key, false, msg.sender, address(this), amount1);
+            reserve.balance1 += amount1;
+            reserve.totalInflow1 += amount1;
+        }
 
-        emit ReserveInflowRecorded(poolId, msg.sender, amount, reserve.balance);
+        emit ReserveInflowRecorded(poolId, msg.sender, amount0, amount1, reserve.balance0, reserve.balance1);
     }
 
     /// @notice Claims the released fee share for a tracked position.
@@ -227,31 +290,37 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
     /// @param tickLower Lower tick.
     /// @param tickUpper Upper tick.
     /// @param salt Position salt.
-    /// @param recipient Recipient of the payout token.
-    /// @return amount Amount transferred.
+    /// @param recipient Recipient of the released amounts.
+    /// @return amount0 Amount of token0 transferred.
+    /// @return amount1 Amount of token1 transferred.
     function claimReleasedFees(
         PoolKey calldata key,
         int24 tickLower,
         int24 tickUpper,
         bytes32 salt,
         address recipient
-    ) external returns (uint256 amount) {
+    ) external returns (uint256 amount0, uint256 amount1) {
         PoolId poolId = key.toId();
         bytes32 positionId = _positionKey(poolId, msg.sender, tickLower, tickUpper, salt);
 
         _settlePoolRelease(poolId);
-        amount = _claimableAfterAccrual(positionId, poolId);
-        if (amount == 0) revert NothingToClaim();
+        (amount0, amount1) = _claimableAfterAccrual(positionId, poolId);
+        if (amount0 == 0 && amount1 == 0) revert NothingToClaim();
 
         PositionInfo storage position = _positions[positionId];
-        position.accruedClaimable = 0;
-        position.rewardDebtX128 = uint256(position.liquidity) * _poolStates[poolId].rewardPerLiquidityX128;
-        position.claimedAmount += amount;
+        position.accruedClaimable0 = 0;
+        position.accruedClaimable1 = 0;
+        position.rewardDebt0X128 = uint256(position.liquidity) * _poolStates[poolId].rewardPerLiquidity0X128;
+        position.rewardDebt1X128 = uint256(position.liquidity) * _poolStates[poolId].rewardPerLiquidity1X128;
+        position.claimedAmount0 += amount0;
+        position.claimedAmount1 += amount1;
 
-        _poolStates[poolId].totalClaimedFees += amount;
-        _transferPayoutToken(key, recipient, amount);
+        _poolStates[poolId].totalClaimedFees0 += amount0;
+        _poolStates[poolId].totalClaimedFees1 += amount1;
+        if (amount0 > 0) _transferPoolToken(key, true, recipient, amount0);
+        if (amount1 > 0) _transferPoolToken(key, false, recipient, amount1);
 
-        emit FeesClaimed(poolId, positionId, recipient, amount);
+        emit FeesClaimed(poolId, positionId, recipient, amount0, amount1);
     }
 
     /// @notice Returns the released but unclaimed amount for a position at the current timestamp.
@@ -266,14 +335,14 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         int24 tickLower,
         int24 tickUpper,
         bytes32 salt
-    ) external view returns (uint256) {
+    ) external view returns (uint256 amount0, uint256 amount1) {
         PoolId poolId = key.toId();
         bytes32 positionId = _positionKey(poolId, operator, tickLower, tickUpper, salt);
         PositionInfo storage position = _positions[positionId];
-        if (position.operator == address(0)) return 0;
+        if (position.operator == address(0)) return (0, 0);
 
-        uint256 rewardPerLiquidityX128 = _previewRewardPerLiquidity(poolId);
-        return _pendingRewards(position, rewardPerLiquidityX128);
+        (uint256 rewardPerLiquidity0X128, uint256 rewardPerLiquidity1X128) = _previewRewardPerLiquidity(poolId);
+        return _pendingRewards(position, rewardPerLiquidity0X128, rewardPerLiquidity1X128);
     }
 
     /// @notice Returns the simulated compensation available for a position and loss amount.
@@ -282,26 +351,28 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
     /// @param tickLower Lower tick.
     /// @param tickUpper Upper tick.
     /// @param salt Position salt.
-    /// @param lossAmount Simulated or user-provided loss amount in payout token units.
+    /// @param lossValueToken0 Simulated or user-provided loss amount in token0-equivalent units.
     function previewCompensation(
         PoolKey calldata key,
         address operator,
         int24 tickLower,
         int24 tickUpper,
         bytes32 salt,
-        uint256 lossAmount
-    ) public view returns (uint256) {
+        uint256 lossValueToken0
+    ) public view returns (uint256 compensation0, uint256 compensation1) {
         PoolId poolId = key.toId();
         bytes32 positionId = _positionKey(poolId, operator, tickLower, tickUpper, salt);
         PositionInfo storage position = _positions[positionId];
-        if (!position.protectionEligible || position.operator == address(0) || position.liquidity == 0 || lossAmount == 0) {
-            return 0;
+        if (
+            !position.protectionEligible || position.operator == address(0) || position.liquidity == 0
+                || lossValueToken0 == 0
+        ) {
+            return (0, 0);
         }
-        if (block.timestamp < position.addedAt + defaultPoolConfig.minHoldingPeriod) return 0;
+        if (block.timestamp < position.addedAt + defaultPoolConfig.minHoldingPeriod) return (0, 0);
 
-        uint256 cappedByPolicy = lossAmount * defaultPoolConfig.maxCoverageBps / BPS_DENOMINATOR;
-        uint256 reserveBalance = _availableReserve(poolId);
-        return cappedByPolicy < reserveBalance ? cappedByPolicy : reserveBalance;
+        uint160 sqrtPriceX96 = _consultSqrtPriceX96(poolId, defaultPoolConfig.compensationLookback);
+        return _capCompensation(poolId, lossValueToken0, sqrtPriceX96);
     }
 
     /// @notice Claims compensation from the shared reserve for an eligible position.
@@ -309,29 +380,34 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
     /// @param tickLower Lower tick.
     /// @param tickUpper Upper tick.
     /// @param salt Position salt.
-    /// @param lossAmount Simulated or user-provided loss amount in payout token units.
-    /// @param recipient Recipient of the payout token.
-    /// @return compensation Amount paid from the reserve.
+    /// @param lossValueToken0 Simulated or user-provided loss amount in token0-equivalent units.
+    /// @param recipient Recipient of the compensation.
+    /// @return compensation0 Amount of token0 paid from the reserve.
+    /// @return compensation1 Amount of token1 paid from the reserve.
     function claimCompensation(
         PoolKey calldata key,
         int24 tickLower,
         int24 tickUpper,
         bytes32 salt,
-        uint256 lossAmount,
+        uint256 lossValueToken0,
         address recipient
-    ) external returns (uint256 compensation) {
+    ) external returns (uint256 compensation0, uint256 compensation1) {
         PoolId poolId = key.toId();
         bytes32 positionId = _positionKey(poolId, msg.sender, tickLower, tickUpper, salt);
 
-        compensation = previewCompensation(key, msg.sender, tickLower, tickUpper, salt, lossAmount);
-        if (compensation == 0) revert NoCompensationAvailable();
+        (compensation0, compensation1) =
+            previewCompensation(key, msg.sender, tickLower, tickUpper, salt, lossValueToken0);
+        if (compensation0 == 0 && compensation1 == 0) revert NoCompensationAvailable();
 
         ReserveState storage reserve = _reserveStates[poolId];
-        reserve.balance -= compensation;
-        reserve.totalPaid += compensation;
+        reserve.balance0 -= compensation0;
+        reserve.balance1 -= compensation1;
+        reserve.totalPaid0 += compensation0;
+        reserve.totalPaid1 += compensation1;
 
-        _transferPayoutToken(key, recipient, compensation);
-        emit CompensationPaid(poolId, positionId, recipient, lossAmount, compensation);
+        if (compensation0 > 0) _transferPoolToken(key, true, recipient, compensation0);
+        if (compensation1 > 0) _transferPoolToken(key, false, recipient, compensation1);
+        emit CompensationPaid(poolId, positionId, recipient, lossValueToken0, compensation0, compensation1);
     }
 
     /// @notice Claims compensation that was reserved during a prior liquidity removal.
@@ -341,26 +417,33 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         int24 tickUpper,
         bytes32 salt,
         address recipient
-    ) external nonReentrant returns (uint256 compensation) {
+    ) external nonReentrant returns (uint256 compensation0, uint256 compensation1) {
         PoolId poolId = key.toId();
         bytes32 positionId = _positionKey(poolId, msg.sender, tickLower, tickUpper, salt);
         PositionInfo storage position = _positions[positionId];
         if (position.operator == address(0)) revert PositionNotFound();
         if (position.operator != msg.sender) revert NotPositionOperator();
 
-        compensation = position.pendingCompensation;
-        if (compensation == 0) revert NoCompensationAvailable();
+        compensation0 = position.pendingCompensation0;
+        compensation1 = position.pendingCompensation1;
+        if (compensation0 == 0 && compensation1 == 0) revert NoCompensationAvailable();
 
-        position.pendingCompensation = 0;
-        position.claimedCompensation += compensation;
+        position.pendingCompensation0 = 0;
+        position.pendingCompensation1 = 0;
+        position.claimedCompensation0 += compensation0;
+        position.claimedCompensation1 += compensation1;
 
         ReserveState storage reserve = _reserveStates[poolId];
-        reserve.lockedBalance -= compensation;
-        reserve.balance -= compensation;
-        reserve.totalPaid += compensation;
+        reserve.lockedBalance0 -= compensation0;
+        reserve.lockedBalance1 -= compensation1;
+        reserve.balance0 -= compensation0;
+        reserve.balance1 -= compensation1;
+        reserve.totalPaid0 += compensation0;
+        reserve.totalPaid1 += compensation1;
 
-        _transferPayoutToken(key, recipient, compensation);
-        emit CompensationPaid(poolId, positionId, recipient, compensation, compensation);
+        if (compensation0 > 0) _transferPoolToken(key, true, recipient, compensation0);
+        if (compensation1 > 0) _transferPoolToken(key, false, recipient, compensation1);
+        emit CompensationPaid(poolId, positionId, recipient, _valueInToken0(compensation0, compensation1, _currentSqrtPriceX96(poolId)), compensation0, compensation1);
     }
 
     /// @notice Returns whether risk mode is currently active for a pool.
@@ -430,8 +513,9 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         int24 tickLower,
         int24 tickUpper,
         bytes32 salt
-    ) external view returns (uint256) {
-        return _positions[_positionKey(key.toId(), operator, tickLower, tickUpper, salt)].pendingCompensation;
+    ) external view returns (uint256 amount0, uint256 amount1) {
+        PositionInfo storage position = _positions[_positionKey(key.toId(), operator, tickLower, tickUpper, salt)];
+        return (position.pendingCompensation0, position.pendingCompensation1);
     }
 
     /// @notice Returns the current oracle-based compensation preview for a portion of a position.
@@ -442,17 +526,17 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         int24 tickUpper,
         bytes32 salt,
         uint128 liquidityToRemove
-    ) external view returns (uint256 compensation, uint256 lossValue, uint160 twapSqrtPriceX96) {
+    ) external view returns (uint256 compensation0, uint256 compensation1, uint256 lossValue, uint160 twapSqrtPriceX96) {
         PoolId poolId = key.toId();
         bytes32 positionId = _positionKey(poolId, operator, tickLower, tickUpper, salt);
         PositionInfo storage position = _positions[positionId];
         if (position.operator == address(0) || liquidityToRemove == 0 || liquidityToRemove > position.liquidity) {
-            return (0, 0, 0);
+            return (0, 0, 0, 0);
         }
 
         twapSqrtPriceX96 = _consultSqrtPriceX96(poolId, defaultPoolConfig.compensationLookback);
-        lossValue = _lossValueForLiquiditySlice(key, position, liquidityToRemove, twapSqrtPriceX96);
-        compensation = _capCompensation(poolId, lossValue);
+        lossValue = _lossValueForLiquiditySlice(position, liquidityToRemove, twapSqrtPriceX96);
+        (compensation0, compensation1) = _capCompensation(poolId, lossValue, twapSqrtPriceX96);
     }
 
     /// @notice Returns the fee that would be applied on the next swap if the pool uses dynamic fees.
@@ -505,13 +589,14 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         if (removing > position.liquidity) revert InvalidConfig();
 
         if (position.protectionEligible && !_isRiskModeActive(poolId)) {
-            _reserveOracleCompensation(poolId, key, positionId, position, uint128(removing));
+            _reserveOracleCompensation(poolId, positionId, position, uint128(removing));
         }
 
         uint128 newLiquidity = uint128(uint256(position.liquidity) - removing);
         _reducePositionDeposits(position, removing);
         position.liquidity = newLiquidity;
-        position.rewardDebtX128 = uint256(newLiquidity) * _poolStates[poolId].rewardPerLiquidityX128;
+        position.rewardDebt0X128 = uint256(newLiquidity) * _poolStates[poolId].rewardPerLiquidity0X128;
+        position.rewardDebt1X128 = uint256(newLiquidity) * _poolStates[poolId].rewardPerLiquidity1X128;
         _poolStates[poolId].totalTrackedLiquidity -= uint128(removing);
         if (newLiquidity == 0 && position.riskyRange) {
             position.protectionEligible = false;
@@ -605,7 +690,8 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         position.liquidity += addedLiquidity;
         position.depositedAmount0 += addedAmount0;
         position.depositedAmount1 += addedAmount1;
-        position.rewardDebtX128 = uint256(position.liquidity) * _poolStates[poolId].rewardPerLiquidityX128;
+        position.rewardDebt0X128 = uint256(position.liquidity) * _poolStates[poolId].rewardPerLiquidity0X128;
+        position.rewardDebt1X128 = uint256(position.liquidity) * _poolStates[poolId].rewardPerLiquidity1X128;
 
         bool riskyRange = _isRiskyRange(key, params.tickLower, params.tickUpper);
         position.riskyRange = riskyRange;
@@ -624,89 +710,174 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
     }
 
     function _settlePoolRelease(PoolId poolId) internal {
-        PoolState storage state = _poolStates[poolId];
-        if (state.smoothingStartedAt == 0) {
-            state.smoothingStartedAt = uint40(block.timestamp);
-            state.lastReleaseAt = uint40(block.timestamp);
-            return;
-        }
-        if (state.smoothedTotal == 0 || state.totalTrackedLiquidity == 0) {
-            state.lastReleaseAt = uint40(block.timestamp);
-            return;
-        }
-
-        uint256 elapsed = block.timestamp - state.smoothingStartedAt;
-        uint256 vested = elapsed >= defaultPoolConfig.smoothingPeriod
-            ? state.smoothedTotal
-            : state.smoothedTotal * elapsed / defaultPoolConfig.smoothingPeriod;
-
-        if (vested <= state.smoothedReleased) {
-            state.lastReleaseAt = uint40(block.timestamp);
-            return;
-        }
-
-        uint256 newlyReleased = vested - state.smoothedReleased;
-        state.smoothedReleased = vested;
-        state.lastReleaseAt = uint40(block.timestamp);
-        state.totalReleasedFees += newlyReleased;
-        state.rewardPerLiquidityX128 += newlyReleased * Q128 / state.totalTrackedLiquidity;
-
-        emit FeeReleaseRecorded(poolId, newlyReleased, state.rewardPerLiquidityX128);
+        _settlePoolReleaseForToken(poolId, true);
+        _settlePoolReleaseForToken(poolId, false);
     }
 
-    function _recordSmoothingInflow(PoolId poolId, address payer, uint256 amount) internal {
+    function _settlePoolReleaseForToken(PoolId poolId, bool isToken0) internal {
+        PoolState storage state = _poolStates[poolId];
+        uint40 startedAt = isToken0 ? state.smoothingStartedAt0 : state.smoothingStartedAt1;
+
+        if (startedAt == 0) {
+            if (isToken0) {
+                state.smoothingStartedAt0 = uint40(block.timestamp);
+                state.lastReleaseAt0 = uint40(block.timestamp);
+            } else {
+                state.smoothingStartedAt1 = uint40(block.timestamp);
+                state.lastReleaseAt1 = uint40(block.timestamp);
+            }
+            return;
+        }
+        uint256 smoothedTotal = isToken0 ? state.smoothedTotal0 : state.smoothedTotal1;
+        uint256 smoothedReleased = isToken0 ? state.smoothedReleased0 : state.smoothedReleased1;
+        if (smoothedTotal == 0 || state.totalTrackedLiquidity == 0) {
+            if (isToken0) {
+                state.lastReleaseAt0 = uint40(block.timestamp);
+            } else {
+                state.lastReleaseAt1 = uint40(block.timestamp);
+            }
+            return;
+        }
+
+        uint256 elapsed = block.timestamp - startedAt;
+        uint256 vested = elapsed >= defaultPoolConfig.smoothingPeriod
+            ? smoothedTotal
+            : smoothedTotal * elapsed / defaultPoolConfig.smoothingPeriod;
+
+        if (vested <= smoothedReleased) {
+            if (isToken0) {
+                state.lastReleaseAt0 = uint40(block.timestamp);
+            } else {
+                state.lastReleaseAt1 = uint40(block.timestamp);
+            }
+            return;
+        }
+
+        uint256 newlyReleased = vested - smoothedReleased;
+        if (isToken0) {
+            state.smoothedReleased0 = vested;
+            state.lastReleaseAt0 = uint40(block.timestamp);
+            state.totalReleasedFees0 += newlyReleased;
+            state.rewardPerLiquidity0X128 += newlyReleased * Q128 / state.totalTrackedLiquidity;
+        } else {
+            state.smoothedReleased1 = vested;
+            state.lastReleaseAt1 = uint40(block.timestamp);
+            state.totalReleasedFees1 += newlyReleased;
+            state.rewardPerLiquidity1X128 += newlyReleased * Q128 / state.totalTrackedLiquidity;
+        }
+
+        emit FeeReleaseRecorded(
+            poolId,
+            isToken0 ? newlyReleased : 0,
+            isToken0 ? 0 : newlyReleased,
+            state.rewardPerLiquidity0X128,
+            state.rewardPerLiquidity1X128
+        );
+    }
+
+    function _recordSmoothingInflow(PoolId poolId, address payer, uint256 amount0, uint256 amount1) internal {
         _settlePoolRelease(poolId);
 
         PoolState storage state = _poolStates[poolId];
-        uint256 remaining = state.smoothedTotal - state.smoothedReleased;
-        state.smoothedTotal = remaining + amount;
-        state.smoothedReleased = 0;
-        state.smoothingStartedAt = uint40(block.timestamp);
-        state.lastReleaseAt = uint40(block.timestamp);
+        if (amount0 > 0) {
+            uint256 remaining0 = state.smoothedTotal0 - state.smoothedReleased0;
+            state.smoothedTotal0 = remaining0 + amount0;
+            state.smoothedReleased0 = 0;
+            state.smoothingStartedAt0 = uint40(block.timestamp);
+            state.lastReleaseAt0 = uint40(block.timestamp);
+        }
+        if (amount1 > 0) {
+            uint256 remaining1 = state.smoothedTotal1 - state.smoothedReleased1;
+            state.smoothedTotal1 = remaining1 + amount1;
+            state.smoothedReleased1 = 0;
+            state.smoothingStartedAt1 = uint40(block.timestamp);
+            state.lastReleaseAt1 = uint40(block.timestamp);
+        }
 
-        emit FeeInflowRecorded(poolId, payer, amount, state.smoothedTotal);
+        emit FeeInflowRecorded(poolId, payer, amount0, amount1, state.smoothedTotal0, state.smoothedTotal1);
     }
 
-    function _previewRewardPerLiquidity(PoolId poolId) internal view returns (uint256 rewardPerLiquidityX128) {
+    function _previewRewardPerLiquidity(PoolId poolId)
+        internal
+        view
+        returns (uint256 rewardPerLiquidity0X128, uint256 rewardPerLiquidity1X128)
+    {
         PoolState storage state = _poolStates[poolId];
-        rewardPerLiquidityX128 = state.rewardPerLiquidityX128;
-        if (state.smoothingStartedAt == 0 || state.smoothedTotal == 0 || state.totalTrackedLiquidity == 0) {
+        rewardPerLiquidity0X128 = _previewRewardPerLiquidityForToken(
+            state.rewardPerLiquidity0X128,
+            state.smoothingStartedAt0,
+            state.smoothedTotal0,
+            state.smoothedReleased0,
+            state.totalTrackedLiquidity
+        );
+        rewardPerLiquidity1X128 = _previewRewardPerLiquidityForToken(
+            state.rewardPerLiquidity1X128,
+            state.smoothingStartedAt1,
+            state.smoothedTotal1,
+            state.smoothedReleased1,
+            state.totalTrackedLiquidity
+        );
+    }
+
+    function _previewRewardPerLiquidityForToken(
+        uint256 baseRewardPerLiquidityX128,
+        uint40 smoothingStartedAt,
+        uint256 smoothedTotal,
+        uint256 smoothedReleased,
+        uint128 totalTrackedLiquidity
+    ) internal view returns (uint256 rewardPerLiquidityX128) {
+        rewardPerLiquidityX128 = baseRewardPerLiquidityX128;
+        if (smoothingStartedAt == 0 || smoothedTotal == 0 || totalTrackedLiquidity == 0) {
             return rewardPerLiquidityX128;
         }
 
-        uint256 elapsed = block.timestamp - state.smoothingStartedAt;
+        uint256 elapsed = block.timestamp - smoothingStartedAt;
         uint256 vested = elapsed >= defaultPoolConfig.smoothingPeriod
-            ? state.smoothedTotal
-            : state.smoothedTotal * elapsed / defaultPoolConfig.smoothingPeriod;
+            ? smoothedTotal
+            : smoothedTotal * elapsed / defaultPoolConfig.smoothingPeriod;
 
-        if (vested > state.smoothedReleased) {
-            rewardPerLiquidityX128 += (vested - state.smoothedReleased) * Q128 / state.totalTrackedLiquidity;
+        if (vested > smoothedReleased) {
+            rewardPerLiquidityX128 += (vested - smoothedReleased) * Q128 / totalTrackedLiquidity;
         }
     }
 
     function _accruePosition(bytes32 positionId, PoolId poolId) internal {
         PositionInfo storage position = _positions[positionId];
-        uint256 rewardPerLiquidityX128 = _poolStates[poolId].rewardPerLiquidityX128;
-        uint256 pending = _pendingRewards(position, rewardPerLiquidityX128);
-        if (pending > 0) {
-            position.accruedClaimable += pending;
-        }
-        position.rewardDebtX128 = uint256(position.liquidity) * rewardPerLiquidityX128;
+        PoolState storage state = _poolStates[poolId];
+        (uint256 pending0, uint256 pending1) =
+            _pendingRewards(position, state.rewardPerLiquidity0X128, state.rewardPerLiquidity1X128);
+        if (pending0 > 0) position.accruedClaimable0 += pending0;
+        if (pending1 > 0) position.accruedClaimable1 += pending1;
+        position.rewardDebt0X128 = uint256(position.liquidity) * state.rewardPerLiquidity0X128;
+        position.rewardDebt1X128 = uint256(position.liquidity) * state.rewardPerLiquidity1X128;
     }
 
-    function _claimableAfterAccrual(bytes32 positionId, PoolId poolId) internal returns (uint256 amount) {
+    function _claimableAfterAccrual(bytes32 positionId, PoolId poolId)
+        internal
+        returns (uint256 amount0, uint256 amount1)
+    {
         PositionInfo storage position = _positions[positionId];
         if (position.operator == address(0)) revert PositionNotFound();
         if (position.operator != msg.sender) revert NotPositionOperator();
 
         _accruePosition(positionId, poolId);
-        amount = position.accruedClaimable;
+        amount0 = position.accruedClaimable0;
+        amount1 = position.accruedClaimable1;
     }
 
-    function _pendingRewards(PositionInfo storage position, uint256 rewardPerLiquidityX128) internal view returns (uint256) {
-        uint256 accruedX128 = uint256(position.liquidity) * rewardPerLiquidityX128;
-        uint256 pendingFromAccumulator = accruedX128 > position.rewardDebtX128 ? (accruedX128 - position.rewardDebtX128) / Q128 : 0;
-        return position.accruedClaimable + pendingFromAccumulator;
+    function _pendingRewards(
+        PositionInfo storage position,
+        uint256 rewardPerLiquidity0X128,
+        uint256 rewardPerLiquidity1X128
+    ) internal view returns (uint256 pending0, uint256 pending1) {
+        uint256 accrued0X128 = uint256(position.liquidity) * rewardPerLiquidity0X128;
+        uint256 accrued1X128 = uint256(position.liquidity) * rewardPerLiquidity1X128;
+        uint256 pendingFromAccumulator0 =
+            accrued0X128 > position.rewardDebt0X128 ? (accrued0X128 - position.rewardDebt0X128) / Q128 : 0;
+        uint256 pendingFromAccumulator1 =
+            accrued1X128 > position.rewardDebt1X128 ? (accrued1X128 - position.rewardDebt1X128) / Q128 : 0;
+        pending0 = position.accruedClaimable0 + pendingFromAccumulator0;
+        pending1 = position.accruedClaimable1 + pendingFromAccumulator1;
     }
 
     function _observeFees(PoolId poolId, BalanceDelta feesAccrued) internal {
@@ -739,7 +910,6 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         uint256 unspecifiedAmount
     ) internal returns (int128) {
         if (defaultPoolConfig.swapHookFeeBps == 0 || unspecifiedAmount == 0) return 0;
-        if (Currency.unwrap(unspecifiedCurrency) != Currency.unwrap(_payoutCurrency(key))) return 0;
 
         uint256 feeAmount = unspecifiedAmount * defaultPoolConfig.swapHookFeeBps / BPS_DENOMINATOR;
         if (feeAmount == 0) return 0;
@@ -752,15 +922,20 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         uint256 smoothingShare = feeAmount - reserveShare;
 
         ReserveState storage reserve = _reserveStates[poolId];
-        reserve.balance += reserveShare;
-        reserve.totalInflow += reserveShare;
-
-        if (smoothingShare > 0) {
-            _recordSmoothingInflow(poolId, payer, smoothingShare);
+        bool isToken0 = Currency.unwrap(unspecifiedCurrency) == Currency.unwrap(key.currency0);
+        if (reserveShare > 0) {
+            if (isToken0) {
+                reserve.balance0 += reserveShare;
+                reserve.totalInflow0 += reserveShare;
+            } else {
+                reserve.balance1 += reserveShare;
+                reserve.totalInflow1 += reserveShare;
+            }
         }
         if (reserveShare > 0) {
-            emit ReserveInflowRecorded(poolId, payer, reserveShare, reserve.balance);
+            emit ReserveInflowRecorded(poolId, payer, isToken0 ? reserveShare : 0, isToken0 ? 0 : reserveShare, reserve.balance0, reserve.balance1);
         }
+        if (smoothingShare > 0) _recordSmoothingInflow(poolId, payer, isToken0 ? smoothingShare : 0, isToken0 ? 0 : smoothingShare);
         emit SwapFeeCaptured(
             poolId,
             payer,
@@ -785,29 +960,29 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
 
     function _reserveOracleCompensation(
         PoolId poolId,
-        PoolKey calldata key,
         bytes32 positionId,
         PositionInfo storage position,
         uint128 liquidityToRemove
     ) internal {
         uint160 twapSqrtPriceX96 = _consultSqrtPriceX96(poolId, defaultPoolConfig.compensationLookback);
-        uint256 lossValue = _lossValueForLiquiditySlice(key, position, liquidityToRemove, twapSqrtPriceX96);
+        uint256 lossValue = _lossValueForLiquiditySlice(position, liquidityToRemove, twapSqrtPriceX96);
         if (lossValue == 0) return;
 
-        uint256 compensation = _capCompensation(poolId, lossValue);
-        if (compensation == 0) return;
+        (uint256 compensation0, uint256 compensation1) = _capCompensation(poolId, lossValue, twapSqrtPriceX96);
+        if (compensation0 == 0 && compensation1 == 0) return;
 
         PositionInfo storage storedPosition = _positions[positionId];
-        storedPosition.pendingCompensation += compensation;
+        storedPosition.pendingCompensation0 += compensation0;
+        storedPosition.pendingCompensation1 += compensation1;
 
         ReserveState storage reserve = _reserveStates[poolId];
-        reserve.lockedBalance += compensation;
+        reserve.lockedBalance0 += compensation0;
+        reserve.lockedBalance1 += compensation1;
 
-        emit CompensationReserved(poolId, positionId, lossValue, compensation);
+        emit CompensationReserved(poolId, positionId, lossValue, compensation0, compensation1);
     }
 
     function _lossValueForLiquiditySlice(
-        PoolKey calldata key,
         PositionInfo storage position,
         uint128 liquidityToRemove,
         uint160 sqrtPriceX96
@@ -817,18 +992,40 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         (uint256 positionAmount0, uint256 positionAmount1) =
             _positionAmountsForLiquidity(position.tickLower, position.tickUpper, liquidityToRemove, sqrtPriceX96);
 
-        uint256 holdValue = _valueInPayoutToken(key, heldAmount0, heldAmount1, sqrtPriceX96);
-        uint256 lpValue = _valueInPayoutToken(key, positionAmount0, positionAmount1, sqrtPriceX96);
+        uint256 holdValue = _valueInToken0(heldAmount0, heldAmount1, sqrtPriceX96);
+        uint256 lpValue = _valueInToken0(positionAmount0, positionAmount1, sqrtPriceX96);
 
         if (holdValue > lpValue) {
             lossValue = holdValue - lpValue;
         }
     }
 
-    function _capCompensation(PoolId poolId, uint256 lossValue) internal view returns (uint256) {
+    function _capCompensation(PoolId poolId, uint256 lossValue, uint160 sqrtPriceX96)
+        internal
+        view
+        returns (uint256 compensation0, uint256 compensation1)
+    {
         uint256 cappedByPolicy = lossValue * defaultPoolConfig.maxCoverageBps / BPS_DENOMINATOR;
-        uint256 reserveAvailable = _availableReserve(poolId);
-        return cappedByPolicy < reserveAvailable ? cappedByPolicy : reserveAvailable;
+        ReserveState storage reserve = _reserveStates[poolId];
+        uint256 available0 = reserve.balance0 - reserve.lockedBalance0;
+        uint256 available1 = reserve.balance1 - reserve.lockedBalance1;
+        uint256 reserveValue0 = _valueInToken0(available0, available1, sqrtPriceX96);
+        uint256 cappedValue0 = cappedByPolicy < reserveValue0 ? cappedByPolicy : reserveValue0;
+        if (cappedValue0 == 0 || reserveValue0 == 0) return (0, 0);
+
+        compensation0 = FullMath.mulDiv(cappedValue0, available0, reserveValue0);
+        uint256 remainingValue0 = cappedValue0 > compensation0 ? cappedValue0 - compensation0 : 0;
+        compensation1 = _quoteToken0InToken1(remainingValue0, sqrtPriceX96);
+        if (compensation1 > available1) {
+            compensation1 = available1;
+        }
+
+        uint256 usedValue0 = compensation0 + _quoteToken1InToken0(compensation1, sqrtPriceX96);
+        if (usedValue0 < cappedValue0) {
+            uint256 shortfall0 = cappedValue0 - usedValue0;
+            uint256 additional0 = shortfall0 < (available0 - compensation0) ? shortfall0 : (available0 - compensation0);
+            compensation0 += additional0;
+        }
     }
 
     function _reducePositionDeposits(PositionInfo storage position, uint256 removedLiquidity) internal {
@@ -859,16 +1056,8 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         }
     }
 
-    function _valueInPayoutToken(PoolKey calldata key, uint256 amount0, uint256 amount1, uint160 sqrtPriceX96)
-        internal
-        view
-        returns (uint256)
-    {
-        if (defaultPoolConfig.payoutToken0) {
-            return amount0 + _quoteToken1InToken0(amount1, sqrtPriceX96);
-        }
-        key;
-        return amount1 + _quoteToken0InToken1(amount0, sqrtPriceX96);
+    function _valueInToken0(uint256 amount0, uint256 amount1, uint160 sqrtPriceX96) internal pure returns (uint256) {
+        return amount0 + _quoteToken1InToken0(amount1, sqrtPriceX96);
     }
 
     function _quoteToken1InToken0(uint256 amount1, uint160 sqrtPriceX96) internal pure returns (uint256) {
@@ -986,11 +1175,6 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         (, tick,,) = poolManager.getSlot0(poolId);
     }
 
-    function _availableReserve(PoolId poolId) internal view returns (uint256) {
-        ReserveState storage reserve = _reserveStates[poolId];
-        return reserve.balance - reserve.lockedBalance;
-    }
-
     function _isRiskyRange(PoolKey calldata key, int24 tickLower, int24 tickUpper) internal view returns (bool) {
         (, int24 currentTick,,) = poolManager.getSlot0(key.toId());
         uint24 rangeWidth = uint24(uint24(tickUpper - tickLower));
@@ -1030,22 +1214,18 @@ contract SteadyLPHook is BaseHook, ReentrancyGuard {
         return defaultPoolConfig.baseDynamicFee;
     }
 
-    function _transferPayoutTokenFrom(PoolKey calldata key, address from, address to, uint256 amount) internal {
-        Currency payoutCurrency = _payoutCurrency(key);
-        address token = Currency.unwrap(payoutCurrency);
+    function _transferPoolTokenFrom(PoolKey calldata key, bool isToken0, address from, address to, uint256 amount)
+        internal
+    {
+        address token = Currency.unwrap(isToken0 ? key.currency0 : key.currency1);
         if (token == address(0)) revert UnsupportedPayoutCurrency();
         if (!IERC20(token).transferFrom(from, to, amount)) revert TransferFailed();
     }
 
-    function _transferPayoutToken(PoolKey calldata key, address to, uint256 amount) internal {
-        Currency payoutCurrency = _payoutCurrency(key);
-        address token = Currency.unwrap(payoutCurrency);
+    function _transferPoolToken(PoolKey calldata key, bool isToken0, address to, uint256 amount) internal {
+        address token = Currency.unwrap(isToken0 ? key.currency0 : key.currency1);
         if (token == address(0)) revert UnsupportedPayoutCurrency();
         if (!IERC20(token).transfer(to, amount)) revert TransferFailed();
-    }
-
-    function _payoutCurrency(PoolKey calldata key) internal view returns (Currency) {
-        return defaultPoolConfig.payoutToken0 ? key.currency0 : key.currency1;
     }
 
     function _positiveAmount(int128 value) internal pure returns (uint256) {

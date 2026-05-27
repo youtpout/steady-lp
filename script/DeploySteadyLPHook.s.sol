@@ -29,8 +29,7 @@ contract DeploySteadyLPHookScript is BaseScript {
             largeSwapThreshold: 5 ether,
             priceMoveTickThreshold: 120,
             compensationLookback: 1 hours,
-            oracleCardinality: 16,
-            payoutToken0: true
+            oracleCardinality: 16
         });
 
         bytes memory constructorArgs = abi.encode(poolManager, config);

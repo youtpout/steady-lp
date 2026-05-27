@@ -85,8 +85,7 @@ contract SteadyLPHookTest is BaseTest {
             largeSwapThreshold: LARGE_SWAP_THRESHOLD,
             priceMoveTickThreshold: PRICE_MOVE_TICK_THRESHOLD,
             compensationLookback: COMPENSATION_LOOKBACK,
-            oracleCardinality: ORACLE_CARDINALITY,
-            payoutToken0: true
+            oracleCardinality: ORACLE_CARDINALITY
         });
 
         bytes memory constructorArgs = abi.encode(poolManager, config);
@@ -220,7 +219,7 @@ contract SteadyLPHookTest is BaseTest {
     }
 
     function testSwapFeeIsSplitBetweenReserveAndSmoothing() public {
-        uint256 reserveBefore = hook.getReserveState(poolKey).balance;
+        SteadyLPHook.ReserveState memory reserveBefore = hook.getReserveState(poolKey);
 
         swapRouter.swapExactTokensForTokens({
             amountIn: 1 ether,
@@ -235,11 +234,13 @@ contract SteadyLPHookTest is BaseTest {
         SteadyLPHook.ReserveState memory reserve = hook.getReserveState(poolKey);
         SteadyLPHook.PoolState memory state = hook.getPoolState(poolKey);
 
-        assertGt(reserve.balance, reserveBefore);
-        assertGt(state.smoothedTotal, 0);
+        assertGt(reserve.balance0 + reserve.balance1, reserveBefore.balance0 + reserveBefore.balance1);
+        assertGt(state.smoothedTotal0 + state.smoothedTotal1, 0);
 
         vm.warp(block.timestamp + (SMOOTHING_PERIOD / 2));
-        assertGt(hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt()), 0);
+        (uint256 claimable0, uint256 claimable1) =
+            hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt());
+        assertGt(claimable0 + claimable1, 0);
     }
 
     function testRiskModeExpiresAfterConfiguredBlocks() public {
@@ -256,37 +257,47 @@ contract SteadyLPHookTest is BaseTest {
         assertTrue(hook.isRiskModeActive(poolKey));
         vm.roll(block.number + RISK_MODE_BLOCKS + 1);
 
-        hook.depositReserve(poolKey, 1 ether);
+        hook.depositReserve(poolKey, 1 ether, 0);
         assertFalse(hook.isRiskModeActive(poolKey));
         assertEq(hook.previewDynamicFee(poolKey), BASE_DYNAMIC_FEE | LPFeeLibrary.OVERRIDE_FEE_FLAG);
     }
 
     function testReserveAcceptsInflows() public {
-        hook.depositReserve(poolKey, 25 ether);
+        hook.depositReserve(poolKey, 25 ether, 10 ether);
         SteadyLPHook.ReserveState memory reserve = hook.getReserveState(poolKey);
 
-        assertEq(reserve.balance, 25 ether);
-        assertEq(reserve.totalInflow, 25 ether);
+        assertEq(reserve.balance0, 25 ether);
+        assertEq(reserve.balance1, 10 ether);
+        assertEq(reserve.totalInflow0, 25 ether);
+        assertEq(reserve.totalInflow1, 10 ether);
     }
 
     function testFeeSmoothingReleasesFundsGradually() public {
-        hook.depositFeeInflow(poolKey, 70 ether);
+        hook.depositFeeInflow(poolKey, 70 ether, 14 ether);
 
-        assertEq(hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt()), 0);
+        (uint256 initialClaimable0, uint256 initialClaimable1) =
+            hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt());
+        assertEq(initialClaimable0, 0);
+        assertEq(initialClaimable1, 0);
 
         vm.warp(block.timestamp + (SMOOTHING_PERIOD / 2));
-        uint256 halfClaimable = hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt());
-        assertApproxEqAbs(halfClaimable, 35 ether, 1);
+        (uint256 halfClaimable0, uint256 halfClaimable1) =
+            hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt());
+        assertApproxEqAbs(halfClaimable0, 35 ether, 1);
+        assertApproxEqAbs(halfClaimable1, 7 ether, 1);
 
         uint256 balanceBefore = token0.balanceOf(address(this));
+        uint256 balance1Before = token1.balanceOf(address(this));
         hook.claimReleasedFees(poolKey, tickLower, tickUpper, _positionSalt(), address(this));
         uint256 balanceAfter = token0.balanceOf(address(this));
+        uint256 balance1After = token1.balanceOf(address(this));
 
         assertApproxEqAbs(balanceAfter - balanceBefore, 35 ether, 1);
+        assertApproxEqAbs(balance1After - balance1Before, 7 ether, 1);
     }
 
     function testLpCannotClaimMoreThanReleasedAmount() public {
-        hook.depositFeeInflow(poolKey, 40 ether);
+        hook.depositFeeInflow(poolKey, 40 ether, 0);
         vm.warp(block.timestamp + (SMOOTHING_PERIOD / 4));
 
         hook.claimReleasedFees(poolKey, tickLower, tickUpper, _positionSalt(), address(this));
@@ -298,19 +309,28 @@ contract SteadyLPHookTest is BaseTest {
     function testCompensationIsCappedByCoverageRatioAndReserveBalance() public {
         vm.warp(block.timestamp + MIN_HOLDING_PERIOD + 1);
 
-        hook.depositReserve(poolKey, 80 ether);
-        assertEq(hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt(), 100 ether), 50 ether);
+        hook.depositReserve(poolKey, 80 ether, 40 ether);
+        (uint256 preview0, uint256 preview1) =
+            hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt(), 100 ether);
+        assertGt(preview0, 0);
+        assertGt(preview1, 0);
+        assertApproxEqAbs(preview0 + preview1, 50 ether, 1);
 
         uint256 balanceBefore = token0.balanceOf(address(this));
+        uint256 balance1Before = token1.balanceOf(address(this));
         hook.claimCompensation(poolKey, tickLower, tickUpper, _positionSalt(), 100 ether, address(this));
         uint256 balanceAfter = token0.balanceOf(address(this));
-        assertEq(balanceAfter - balanceBefore, 50 ether);
+        uint256 balance1After = token1.balanceOf(address(this));
+        assertEq(balanceAfter - balanceBefore, preview0);
+        assertEq(balance1After - balance1Before, preview1);
 
-        assertEq(hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt(), 100 ether), 30 ether);
+        (uint256 nextPreview0, uint256 nextPreview1) =
+            hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt(), 100 ether);
+        assertApproxEqAbs(nextPreview0 + nextPreview1, 50 ether, 1);
     }
 
     function testOracleCompensationIsReservedOnRemoveAndClaimedDirectly() public {
-        hook.depositReserve(poolKey, 100 ether);
+        hook.depositReserve(poolKey, 100 ether, 50 ether);
 
         swapRouter.swapExactTokensForTokens({
             amountIn: LARGE_SWAP_THRESHOLD,
@@ -325,7 +345,7 @@ contract SteadyLPHookTest is BaseTest {
         vm.roll(block.number + RISK_MODE_BLOCKS + 1);
         vm.warp(block.timestamp + MIN_HOLDING_PERIOD + COMPENSATION_LOOKBACK + 1);
 
-        uint256 reserveBefore = hook.getReserveState(poolKey).balance;
+        SteadyLPHook.ReserveState memory reserveBefore = hook.getReserveState(poolKey);
         positionManager.decreaseLiquidity(
             tokenId,
             10e18,
@@ -336,22 +356,34 @@ contract SteadyLPHookTest is BaseTest {
             hookData
         );
 
-        uint256 pending = hook.previewPendingCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt());
-        assertGt(pending, 0);
+        (uint256 pending0, uint256 pending1) =
+            hook.previewPendingCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt());
+        assertGt(pending0 + pending1, 0);
 
         uint256 balanceBefore = token0.balanceOf(address(this));
+        uint256 balance1Before = token1.balanceOf(address(this));
         hook.claimPendingCompensation(poolKey, tickLower, tickUpper, _positionSalt(), address(this));
         uint256 balanceAfter = token0.balanceOf(address(this));
+        uint256 balance1After = token1.balanceOf(address(this));
+        SteadyLPHook.ReserveState memory reserveAfter = hook.getReserveState(poolKey);
 
-        assertEq(balanceAfter - balanceBefore, pending);
-        assertLt(hook.getReserveState(poolKey).balance, reserveBefore);
+        assertEq(balanceAfter - balanceBefore, pending0);
+        assertEq(balance1After - balance1Before, pending1);
+        assertLt(reserveAfter.balance0, reserveBefore.balance0);
+        assertLt(reserveAfter.balance1, reserveBefore.balance1);
     }
 
     function testNoFixedApyOrGuaranteedYieldLogicExists() public {
         vm.warp(block.timestamp + 365 days);
 
-        assertEq(hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt()), 0);
-        assertEq(hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt(), 0), 0);
+        (uint256 claimable0, uint256 claimable1) =
+            hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt());
+        assertEq(claimable0, 0);
+        assertEq(claimable1, 0);
+        (uint256 compensation0, uint256 compensation1) =
+            hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt(), 0);
+        assertEq(compensation0, 0);
+        assertEq(compensation1, 0);
     }
 
     function _alignToSpacing(int24 tick, int24 spacing) internal pure returns (int24) {
