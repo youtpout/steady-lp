@@ -377,9 +377,15 @@ contract SteadyLPHook is BaseHook {
         PositionInfo storage position = _positions[positionId];
         if (position.operator == address(0)) revert PositionNotFound();
         if (position.operator != operator) revert NotPositionOperator();
-        if (block.timestamp < position.addedAt + defaultPoolConfig.minHoldingPeriod) revert MinimumHoldNotMet();
 
         _accruePosition(positionId, poolId);
+
+        if (block.timestamp < position.addedAt + defaultPoolConfig.minHoldingPeriod) {
+            if (position.protectionEligible) {
+                position.protectionEligible = false;
+                emit ProtectionEligibilityUpdated(poolId, positionId, false);
+            }
+        }
 
         uint256 removing = uint256(-params.liquidityDelta);
         if (removing > position.liquidity) revert InvalidConfig();

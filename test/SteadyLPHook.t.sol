@@ -49,7 +49,6 @@ contract SteadyLPHookTest is BaseTest {
 
     bytes internal hookData;
     uint256 internal tokenId;
-    bytes32 internal constant POSITION_SALT = bytes32(0);
     int24 internal tickLower;
     int24 internal tickUpper;
     uint128 internal liquidityAmount = 100e18;
@@ -131,7 +130,7 @@ contract SteadyLPHookTest is BaseTest {
 
     function testAddingLiquidityRecordsPositionData() public view {
         SteadyLPHook.PositionInfo memory position =
-            hook.getPositionInfo(poolKey, address(this), tickLower, tickUpper, POSITION_SALT);
+            hook.getPositionInfo(poolKey, address(this), tickLower, tickUpper, _positionSalt());
 
         assertEq(position.operator, address(this));
         assertEq(position.liquidity, liquidityAmount);
@@ -143,8 +142,7 @@ contract SteadyLPHookTest is BaseTest {
         assertFalse(position.riskyRange);
     }
 
-    function testRemovingLiquidityBeforeMinimumHoldingPeriodIsBlocked() public {
-        vm.expectRevert(SteadyLPHook.MinimumHoldNotMet.selector);
+    function testRemovingLiquidityBeforeMinimumHoldingPeriodIsMarkedIneligible() public {
         positionManager.decreaseLiquidity(
             tokenId,
             1e18,
@@ -154,6 +152,10 @@ contract SteadyLPHookTest is BaseTest {
             block.timestamp,
             hookData
         );
+
+        SteadyLPHook.PositionInfo memory position =
+            hook.getPositionInfo(poolKey, address(this), tickLower, tickUpper, _positionSalt());
+        assertFalse(position.protectionEligible);
     }
 
     function testNarrowLiquidityAroundActiveTickIsFlaggedRisky() public {
@@ -170,7 +172,8 @@ contract SteadyLPHookTest is BaseTest {
             10e18
         );
 
-        positionManager.mint(
+        uint256 narrowTokenId;
+        (narrowTokenId,) = positionManager.mint(
             poolKey,
             narrowLower,
             narrowUpper,
@@ -183,7 +186,7 @@ contract SteadyLPHookTest is BaseTest {
         );
 
         SteadyLPHook.PositionInfo memory position =
-            hook.getPositionInfo(poolKey, address(this), narrowLower, narrowUpper, POSITION_SALT);
+            hook.getPositionInfo(poolKey, address(this), narrowLower, narrowUpper, bytes32(narrowTokenId));
 
         assertTrue(position.riskyRange);
         assertFalse(position.protectionEligible);
@@ -235,14 +238,14 @@ contract SteadyLPHookTest is BaseTest {
     function testFeeSmoothingReleasesFundsGradually() public {
         hook.depositFeeInflow(poolKey, 70 ether);
 
-        assertEq(hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, POSITION_SALT), 0);
+        assertEq(hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt()), 0);
 
         vm.warp(block.timestamp + (SMOOTHING_PERIOD / 2));
-        uint256 halfClaimable = hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, POSITION_SALT);
+        uint256 halfClaimable = hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt());
         assertApproxEqAbs(halfClaimable, 35 ether, 1);
 
         uint256 balanceBefore = token0.balanceOf(address(this));
-        hook.claimReleasedFees(poolKey, tickLower, tickUpper, POSITION_SALT, address(this));
+        hook.claimReleasedFees(poolKey, tickLower, tickUpper, _positionSalt(), address(this));
         uint256 balanceAfter = token0.balanceOf(address(this));
 
         assertApproxEqAbs(balanceAfter - balanceBefore, 35 ether, 1);
@@ -252,36 +255,40 @@ contract SteadyLPHookTest is BaseTest {
         hook.depositFeeInflow(poolKey, 40 ether);
         vm.warp(block.timestamp + (SMOOTHING_PERIOD / 4));
 
-        hook.claimReleasedFees(poolKey, tickLower, tickUpper, POSITION_SALT, address(this));
+        hook.claimReleasedFees(poolKey, tickLower, tickUpper, _positionSalt(), address(this));
 
         vm.expectRevert(SteadyLPHook.NothingToClaim.selector);
-        hook.claimReleasedFees(poolKey, tickLower, tickUpper, POSITION_SALT, address(this));
+        hook.claimReleasedFees(poolKey, tickLower, tickUpper, _positionSalt(), address(this));
     }
 
     function testCompensationIsCappedByCoverageRatioAndReserveBalance() public {
         vm.warp(block.timestamp + MIN_HOLDING_PERIOD + 1);
 
         hook.depositReserve(poolKey, 80 ether);
-        assertEq(hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, POSITION_SALT, 100 ether), 50 ether);
+        assertEq(hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt(), 100 ether), 50 ether);
 
         uint256 balanceBefore = token0.balanceOf(address(this));
-        hook.claimCompensation(poolKey, tickLower, tickUpper, POSITION_SALT, 100 ether, address(this));
+        hook.claimCompensation(poolKey, tickLower, tickUpper, _positionSalt(), 100 ether, address(this));
         uint256 balanceAfter = token0.balanceOf(address(this));
         assertEq(balanceAfter - balanceBefore, 50 ether);
 
-        assertEq(hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, POSITION_SALT, 100 ether), 30 ether);
+        assertEq(hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt(), 100 ether), 30 ether);
     }
 
     function testNoFixedApyOrGuaranteedYieldLogicExists() public {
         vm.warp(block.timestamp + 365 days);
 
-        assertEq(hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, POSITION_SALT), 0);
-        assertEq(hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, POSITION_SALT, 0), 0);
+        assertEq(hook.previewClaimableFees(poolKey, address(this), tickLower, tickUpper, _positionSalt()), 0);
+        assertEq(hook.previewCompensation(poolKey, address(this), tickLower, tickUpper, _positionSalt(), 0), 0);
     }
 
     function _alignToSpacing(int24 tick, int24 spacing) internal pure returns (int24) {
         int24 compressed = tick / spacing;
         if (tick < 0 && tick % spacing != 0) compressed--;
         return compressed * spacing;
+    }
+
+    function _positionSalt() internal view returns (bytes32) {
+        return bytes32(tokenId);
     }
 }
