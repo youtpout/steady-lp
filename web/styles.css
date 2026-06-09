@@ -89,6 +89,12 @@ h1 span { color: transparent; -webkit-text-stroke: 1.5px var(--ink); }
 .notice-icon { display: grid; flex: 0 0 21px; place-items: center; width: 21px; height: 21px; border-radius: 50%; background: var(--green); font: 11px "DM Mono"; }
 .warning { margin-top: 24px; margin-bottom: 0; background: rgba(255,112,69,.08); }
 .warning .notice-icon { background: var(--orange); color: white; }
+.conditional { display: none; }
+.conditional.visible { display: grid; }
+.toggle-row { display: flex; align-items: center; gap: 10px; width: fit-content; margin-bottom: 18px; }
+.toggle-row input { width: 16px; }
+.toggle-row span { color: var(--ink); }
+.action-row { display: flex; justify-content: flex-end; gap: 10px; padding-top: 12px; }
 
 .form-section { margin: 28px 0 34px; }
 .section-title { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; color: var(--muted); font: 10px "DM Mono"; text-transform: uppercase; letter-spacing: .08em; }
@@ -142,6 +148,18 @@ small { color: #94978d; font: 9px "DM Mono"; }
 }
 .toast.show { opacity: 1; transform: translateY(0); }
 .toast.error { background: #752c1b; }
+.modal { display: none; position: fixed; z-index: 20; inset: 0; place-items: center; padding: 20px; }
+.modal.open { display: grid; }
+.modal-backdrop { position: absolute; inset: 0; background: rgba(22,23,19,.55); backdrop-filter: blur(7px); }
+.modal-card { position: relative; width: min(460px, 100%); padding: 25px; border-radius: 12px; background: var(--paper); box-shadow: 0 30px 100px rgba(0,0,0,.25); }
+.icon-button { border: 0; background: transparent; font-size: 24px; cursor: pointer; }
+.wallet-list { display: grid; gap: 9px; }
+.wallet-option { display: flex; align-items: center; gap: 13px; padding: 13px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.55); cursor: pointer; text-align: left; }
+.wallet-option:hover { border-color: var(--ink); }
+.wallet-option img { width: 28px; height: 28px; border-radius: 7px; }
+.wallet-option strong { display: block; font-size: 12px; }
+.wallet-option span { color: var(--muted); font: 9px "DM Mono"; }
+.modal-help { margin: 18px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 
 @media (max-width: 850px) {
   .hero, .architecture { grid-template-columns: 1fr; }

@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -53,6 +53,8 @@
 
       <nav class="tabs" aria-label="Sections">
         <button class="tab active" data-tab="deploy">New pool</button>
+        <button class="tab" data-tab="swap">Swap</button>
+        <button class="tab" data-tab="liquidity">Liquidity</button>
         <button class="tab" data-tab="claim">Claim</button>
         <button class="tab" data-tab="settings">Contracts</button>
       </nav>
@@ -69,8 +71,8 @@
         <div class="notice">
           <span class="notice-icon">i</span>
           <p>
-            This operation initializes an empty pool. Initial liquidity can then be added through the
-            <strong>official PositionManager</strong>. The selected hook defines the SteadyLP policy.
+            Initialize the pool only, or atomically initialize it with a first NFT liquidity position through the
+            <strong>official PositionManager</strong>.
           </p>
         </div>
 
@@ -112,7 +114,7 @@
             </div>
             <div class="grid two">
               <label>
-                <span>Initial token1 / token0 price</span>
+                <span>Initial Token B / Token A price</span>
                 <input id="startingPrice" type="number" value="1" min="0" step="any" required />
               </label>
               <label>
@@ -120,6 +122,22 @@
                 <input id="poolHook" placeholder="0x…" required />
                 <small>Must have the expected permission bits</small>
               </label>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <div class="section-title"><span>Initial liquidity (optional)</span><span class="line"></span></div>
+            <label class="toggle-row">
+              <input id="addInitialLiquidity" type="checkbox" />
+              <span>Create the first liquidity position atomically</span>
+            </label>
+            <div class="grid three conditional" id="initialLiquidityFields">
+              <label><span>Lower tick</span><input id="initialTickLower" type="number" value="-887220" /></label>
+              <label><span>Upper tick</span><input id="initialTickUpper" type="number" value="887220" /></label>
+              <label><span>Liquidity units</span><input id="initialLiquidity" type="number" min="1" value="1000000000000000000" /></label>
+              <label><span>Token0 max (raw)</span><input id="initialAmount0Max" type="number" min="0" value="100000000000000000000" /></label>
+              <label><span>Token1 max (raw)</span><input id="initialAmount1Max" type="number" min="0" value="100000000000000000000" /></label>
+              <label><span>Deadline (minutes)</span><input id="initialDeadline" type="number" min="1" value="20" /></label>
             </div>
           </div>
 
@@ -133,10 +151,53 @@
         </form>
       </section>
 
+      <section class="panel" id="swapPanel">
+        <div class="panel-heading">
+          <div><p class="step">02 / TRADE</p><h2>Swap through Universal Router</h2></div>
+          <span class="status-pill">Exact input</span>
+        </div>
+        <div class="notice"><span class="notice-icon">i</span><p>Approve the input token first. The transaction uses the official Universal Router and a user-defined minimum output.</p></div>
+        <form id="swapForm">
+          <div class="grid two pool-key-fields"></div>
+          <div class="grid three">
+            <label><span>Direction</span><select id="swapDirection"><option value="true">token0 → token1</option><option value="false">token1 → token0</option></select></label>
+            <label><span>Amount in (raw)</span><input id="swapAmountIn" type="number" min="1" required /></label>
+            <label><span>Minimum amount out (raw)</span><input id="swapAmountOutMin" type="number" min="0" value="0" required /></label>
+            <label><span>Deadline (minutes)</span><input id="swapDeadline" type="number" min="1" value="10" required /></label>
+          </div>
+          <div class="action-row">
+            <button class="button approval-action" data-target="router" type="button">Approve input token</button>
+            <button class="button primary" type="submit">Execute swap →</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel" id="liquidityPanel">
+        <div class="panel-heading">
+          <div><p class="step">03 / MANAGE</p><h2>Position liquidity</h2></div>
+          <button class="button button-compact ghost" id="loadPositionButton">Load position ID</button>
+        </div>
+        <form id="liquidityForm">
+          <div class="grid two pool-key-fields"></div>
+          <div class="grid three">
+            <label><span>Position token ID</span><input id="manageTokenId" type="number" min="0" required /></label>
+            <label><span>Liquidity units</span><input id="manageLiquidity" type="number" min="0" value="0" required /></label>
+            <label><span>Operation</span><select id="liquidityOperation"><option value="increase">Increase</option><option value="decrease">Decrease</option><option value="collect">Collect fees</option><option value="burn">Burn position</option></select></label>
+            <label><span>Token0 max / min (raw)</span><input id="manageAmount0" type="number" min="0" value="0" /></label>
+            <label><span>Token1 max / min (raw)</span><input id="manageAmount1" type="number" min="0" value="0" /></label>
+            <label><span>Deadline (minutes)</span><input id="manageDeadline" type="number" min="1" value="20" /></label>
+          </div>
+          <div class="action-row">
+            <button class="button approval-action" data-target="position" type="button">Approve pool tokens</button>
+            <button class="button primary" type="submit">Submit operation →</button>
+          </div>
+        </form>
+      </section>
+
       <section class="panel" id="claimPanel">
         <div class="panel-heading">
           <div>
-            <p class="step">02 / CLAIM</p>
+            <p class="step">04 / CLAIM</p>
             <h2>Position claims</h2>
           </div>
           <button class="button button-compact ghost" id="previewButton">Refresh amounts</button>
@@ -187,7 +248,7 @@
       <section class="panel" id="settingsPanel">
         <div class="panel-heading">
           <div>
-            <p class="step">03 / CONNECTION</p>
+            <p class="step">05 / CONNECTION</p>
             <h2>Contract addresses</h2>
           </div>
           <span class="status-pill" id="chainIdLabel">Chain —</span>
@@ -200,6 +261,14 @@
           <label>
             <span>Default SteadyLP hook</span>
             <input id="defaultHook" placeholder="0x…" />
+          </label>
+          <label>
+            <span>Official Universal Router</span>
+            <input id="universalRouter" placeholder="Selected automatically for the connected network" />
+          </label>
+          <label>
+            <span>Permit2</span>
+            <input id="permit2" value="0x000000000022D473030F116dDEE9F6B43aC78BA3" />
           </label>
         </div>
         <div class="notice warning">
@@ -222,6 +291,14 @@
     </main>
 
     <div class="toast" id="toast"></div>
-    <script type="module" src="./app.js"></script>
+    <div class="modal" id="walletModal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-wallet></div>
+      <div class="modal-card">
+        <div class="panel-heading"><div><p class="step">CONNECT</p><h2>Choose a wallet</h2></div><button class="icon-button" data-close-wallet>×</button></div>
+        <div class="wallet-list" id="walletList"></div>
+        <p class="modal-help">Installed EIP-6963 wallets appear separately. The browser fallback uses the default injected provider.</p>
+      </div>
+    </div>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>

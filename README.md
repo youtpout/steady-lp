@@ -11,7 +11,8 @@ The static console in [`web/`](web/) lets a connected wallet initialize a new Un
 
 ```bash
 cd web
-python3 -m http.server 8080
+npm install
+npm run dev
 ```
 
 ## How It Works Today
