@@ -22,7 +22,7 @@
       <div class="wallet-zone">
         <span class="network-dot"></span>
         <span id="networkLabel">Wallet not connected</span>
-        <button class="button button-compact" id="connectButton">Connect</button>
+        <div id="walletRoot"></div>
       </div>
     </header>
 
@@ -275,6 +275,10 @@
           <span class="notice-icon">!</span>
           <p>Always verify official deployment addresses before a mainnet transaction. Claims are sent to the connected wallet.</p>
         </div>
+        <div class="notice warning" id="walletConnectWarning">
+          <span class="notice-icon">!</span>
+          <p>WalletConnect mobile QR codes require <code>VITE_WALLETCONNECT_PROJECT_ID</code>. Browser extension wallets remain available without it.</p>
+        </div>
       </section>
 
       <section class="architecture">
@@ -291,14 +295,6 @@
     </main>
 
     <div class="toast" id="toast"></div>
-    <div class="modal" id="walletModal" aria-hidden="true">
-      <div class="modal-backdrop" data-close-wallet></div>
-      <div class="modal-card">
-        <div class="panel-heading"><div><p class="step">CONNECT</p><h2>Choose a wallet</h2></div><button class="icon-button" data-close-wallet>×</button></div>
-        <div class="wallet-list" id="walletList"></div>
-        <p class="modal-help">Installed EIP-6963 wallets appear separately. The browser fallback uses the default injected provider.</p>
-      </div>
-    </div>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

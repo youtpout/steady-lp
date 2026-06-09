@@ -10,6 +10,7 @@ import {
   toBeHex,
   zeroPadValue,
 } from "ethers";
+import { bootstrapWallet, walletConnectConfigured } from "./wallet.jsx";
 
 const ZERO = "0x0000000000000000000000000000000000000000";
 const PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
@@ -49,7 +50,6 @@ const HOOK_ABI = [
 ];
 
 const positionInterface = new Interface(POSITION_ABI);
-const discoveredWallets = new Map();
 let provider;
 let signer;
 let account;
@@ -60,16 +60,15 @@ const raw = (id) => BigInt(value(id) || "0");
 
 setupPoolKeyFields();
 setupTabs();
-setupWalletDiscovery();
+bootstrapWallet(handleWalletChange);
+$("walletConnectWarning").hidden = walletConnectConfigured;
 
-$("connectButton").addEventListener("click", openWalletModal);
 $("deployForm").addEventListener("submit", deployPool);
 $("swapForm").addEventListener("submit", executeSwap);
 $("liquidityForm").addEventListener("submit", manageLiquidity);
 $("loadPositionButton").addEventListener("click", loadPosition);
 $("previewButton").addEventListener("click", previewClaims);
 $("addInitialLiquidity").addEventListener("change", (event) => $("initialLiquidityFields").classList.toggle("visible", event.target.checked));
-document.querySelectorAll("[data-close-wallet]").forEach((button) => button.addEventListener("click", closeWalletModal));
 document.querySelectorAll(".approval-action").forEach((button) => button.addEventListener("click", () => approveFor(button.dataset.target, button)));
 document.querySelectorAll(".claim-action").forEach((button) => button.addEventListener("click", () => claim(button.dataset.claim)));
 ["tokenA", "tokenB", "feeMode", "staticFee", "tickSpacing", "startingPrice", "poolHook"].forEach((id) => $(id).addEventListener("input", updateSummary));
@@ -95,45 +94,23 @@ function setupPoolKeyFields() {
   });
 }
 
-function setupWalletDiscovery() {
-  window.addEventListener("eip6963:announceProvider", (event) => {
-    discoveredWallets.set(event.detail.info.uuid, event.detail);
-    renderWallets();
-  });
-  window.dispatchEvent(new Event("eip6963:requestProvider"));
-  renderWallets();
-}
-
-function renderWallets() {
-  const options = [...discoveredWallets.values()].map(({ info, provider: walletProvider }) => walletButton(info.name, info.rdns, info.icon, walletProvider));
-  if (window.ethereum) options.push(walletButton("Browser wallet", "Injected provider", "", window.ethereum));
-  $("walletList").replaceChildren(...options);
-  if (!options.length) $("walletList").innerHTML = "<p class='modal-help'>No injected wallet detected. Install a browser wallet and reload.</p>";
-}
-
-function walletButton(name, detail, icon, walletProvider) {
-  const button = document.createElement("button");
-  button.className = "wallet-option";
-  button.type = "button";
-  button.innerHTML = `${icon ? `<img src="${icon}" alt="" />` : "<span class='brand-mark'>W</span>"}<span><strong>${escapeHtml(name)}</strong><span>${escapeHtml(detail)}</span></span>`;
-  button.addEventListener("click", () => connect(walletProvider, name));
-  return button;
-}
-
-async function connect(walletProvider, walletName) {
+async function handleWalletChange({ address, chainId, isConnected, walletClient }) {
+  if (!isConnected || !address || !walletClient) {
+    provider = undefined;
+    signer = undefined;
+    account = undefined;
+    $("networkLabel").textContent = "Wallet not connected";
+    document.querySelector(".wallet-zone").classList.remove("connected");
+    return;
+  }
   try {
-    provider = new BrowserProvider(walletProvider);
-    await provider.send("eth_requestAccounts", []);
+    provider = new BrowserProvider(walletClient.transport);
     signer = await provider.getSigner();
-    account = await signer.getAddress();
-    const chainId = Number((await provider.getNetwork()).chainId);
+    account = address;
     applyDeployment(chainId);
     $("networkLabel").textContent = `${DEPLOYMENTS[chainId]?.name || `Chain ${chainId}`} · ${short(account)}`;
     $("chainIdLabel").textContent = `Chain ${chainId}`;
-    $("connectButton").textContent = `${walletName} · ${short(account)}`;
     document.querySelector(".wallet-zone").classList.add("connected");
-    closeWalletModal();
-    notify("Wallet connected.");
   } catch (error) {
     notify(readError(error), true);
   }
@@ -472,8 +449,7 @@ function checkedAddress(address, label) {
 
 async function ensureConnected() {
   if (!signer || !account) {
-    openWalletModal();
-    throw new Error("Choose a wallet to continue.");
+    throw new Error("Connect a browser or mobile wallet to continue.");
   }
 }
 
@@ -481,16 +457,6 @@ async function waitFor(tx, label) {
   notify(`Transaction sent · ${short(tx.hash)}`);
   await tx.wait();
   notify(`${label} · ${short(tx.hash)}`);
-}
-
-function openWalletModal() {
-  $("walletModal").classList.add("open");
-  $("walletModal").setAttribute("aria-hidden", "false");
-}
-
-function closeWalletModal() {
-  $("walletModal").classList.remove("open");
-  $("walletModal").setAttribute("aria-hidden", "true");
 }
 
 function setBusy(button, busy, label) {
@@ -501,12 +467,6 @@ function setBusy(button, busy, label) {
 
 function short(text) {
   return `${text.slice(0, 6)}…${text.slice(-4)}`;
-}
-
-function escapeHtml(text) {
-  const node = document.createElement("span");
-  node.textContent = text;
-  return node.innerHTML;
 }
 
 let toastTimer;

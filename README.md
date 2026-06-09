@@ -15,6 +15,8 @@ npm install
 npm run dev
 ```
 
+For WalletConnect QR codes and mobile wallets, copy `web/.env.example` to `web/.env` and set a free `VITE_WALLETCONNECT_PROJECT_ID` from WalletConnect Cloud.
+
 ## How It Works Today
 
 1. Position and pool tracking

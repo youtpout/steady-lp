@@ -2,7 +2,7 @@
 
 Vite-powered dApp for:
 
-- selecting an installed wallet through EIP-6963;
+- connecting browser extension wallets or mobile wallets through RainbowKit and WalletConnect;
 - initializing a new Uniswap v4 pool, optionally with initial liquidity;
 - approving ERC20s through Permit2;
 - swapping through the official Universal Router;
@@ -17,6 +17,15 @@ cd web
 npm install
 npm run dev
 ```
+
+WalletConnect mobile support requires a free project ID:
+
+```bash
+cp .env.example .env
+# Set VITE_WALLETCONNECT_PROJECT_ID in .env
+```
+
+Create the project ID at [WalletConnect Cloud](https://cloud.walletconnect.com). Browser extension wallets still work without it.
 
 Build for production:
 
