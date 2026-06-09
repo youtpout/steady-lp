@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Pool deployment and claims console for SteadyLP." />
+    <title>SteadyLP Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <header class="topbar">
+      <a class="brand" href="#">
+        <span class="brand-mark">S</span>
+        <span>SteadyLP</span>
+        <span class="tag">console</span>
+      </a>
+      <div class="wallet-zone">
+        <span class="network-dot"></span>
+        <span id="networkLabel">Wallet not connected</span>
+        <button class="button button-compact" id="connectButton">Connect</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Uniswap v4 · Pool operations</p>
+          <h1>Deploy. Track.<br /><span>Claim.</span></h1>
+          <p class="hero-copy">
+            A direct console to initialize a pool with SteadyLP and claim position rewards or compensation.
+          </p>
+        </div>
+        <div class="hero-stats">
+          <div class="stat">
+            <span>Execution</span>
+            <strong>Onchain</strong>
+          </div>
+          <div class="stat">
+            <span>Pool engine</span>
+            <strong>Uniswap v4</strong>
+          </div>
+          <div class="stat accent-stat">
+            <span>Protection</span>
+            <strong>SteadyLP</strong>
+          </div>
+        </div>
+      </section>
+
+      <nav class="tabs" aria-label="Sections">
+        <button class="tab active" data-tab="deploy">New pool</button>
+        <button class="tab" data-tab="claim">Claim</button>
+        <button class="tab" data-tab="settings">Contracts</button>
+      </nav>
+
+      <section class="panel active" id="deployPanel">
+        <div class="panel-heading">
+          <div>
+            <p class="step">01 / INITIALIZE</p>
+            <h2>Pool configuration</h2>
+          </div>
+          <span class="status-pill">Single transaction</span>
+        </div>
+
+        <div class="notice">
+          <span class="notice-icon">i</span>
+          <p>
+            This operation initializes an empty pool. Initial liquidity can then be added through the
+            <strong>official PositionManager</strong>. The selected hook defines the SteadyLP policy.
+          </p>
+        </div>
+
+        <form id="deployForm">
+          <div class="form-section">
+            <div class="section-title"><span>Pair</span><span class="line"></span></div>
+            <div class="grid two">
+              <label>
+                <span>Token A</span>
+                <input id="tokenA" placeholder="0x…" required />
+                <small>Use 0x000…000 for the native currency</small>
+              </label>
+              <label>
+                <span>Token B</span>
+                <input id="tokenB" placeholder="0x…" required />
+                <small>Currencies are sorted automatically</small>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <div class="section-title"><span>Market design</span><span class="line"></span></div>
+            <div class="grid three">
+              <label>
+                <span>Fee mode</span>
+                <select id="feeMode">
+                  <option value="dynamic">Dynamic SteadyLP</option>
+                  <option value="static">Static</option>
+                </select>
+              </label>
+              <label>
+                <span>Static fee</span>
+                <div class="input-suffix"><input id="staticFee" type="number" value="3000" min="0" max="1000000" /><b>pips</b></div>
+              </label>
+              <label>
+                <span>Tick spacing</span>
+                <input id="tickSpacing" type="number" value="60" min="1" max="32767" required />
+              </label>
+            </div>
+            <div class="grid two">
+              <label>
+                <span>Initial token1 / token0 price</span>
+                <input id="startingPrice" type="number" value="1" min="0" step="any" required />
+              </label>
+              <label>
+                <span>Hook SteadyLP</span>
+                <input id="poolHook" placeholder="0x…" required />
+                <small>Must have the expected permission bits</small>
+              </label>
+            </div>
+          </div>
+
+          <div class="summary">
+            <div>
+              <span>Pool key</span>
+              <code id="poolSummary">Complete the parameters</code>
+            </div>
+            <button class="button primary" type="submit">Initialize pool <span>→</span></button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel" id="claimPanel">
+        <div class="panel-heading">
+          <div>
+            <p class="step">02 / CLAIM</p>
+            <h2>Position claims</h2>
+          </div>
+          <button class="button button-compact ghost" id="previewButton">Refresh amounts</button>
+        </div>
+
+        <form id="claimForm">
+          <div class="form-section">
+            <div class="section-title"><span>Identify the position</span><span class="line"></span></div>
+            <div class="grid two">
+              <label><span>Token 0</span><input id="claimToken0" placeholder="0x…" required /></label>
+              <label><span>Token 1</span><input id="claimToken1" placeholder="0x…" required /></label>
+              <label><span>Pool fee</span><input id="claimFee" type="number" value="8388608" required /></label>
+              <label><span>Tick spacing</span><input id="claimSpacing" type="number" value="60" required /></label>
+              <label><span>Lower tick</span><input id="tickLower" type="number" placeholder="-887220" required /></label>
+              <label><span>Upper tick</span><input id="tickUpper" type="number" placeholder="887220" required /></label>
+              <label><span>Hook</span><input id="claimHook" placeholder="0x…" required /></label>
+              <label>
+                <span>Position token ID</span>
+                <input id="positionTokenId" type="number" min="0" placeholder="e.g. 12" required />
+                <small>Used as salt by the PositionManager</small>
+              </label>
+            </div>
+          </div>
+
+          <div class="claim-cards">
+            <article class="claim-card">
+              <span class="claim-kind">Smoothed rewards</span>
+              <strong id="feePreview">— / —</strong>
+              <p>Fees already released for this position.</p>
+              <button class="button claim-action" data-claim="fees" type="button">Claim rewards</button>
+            </article>
+            <article class="claim-card">
+              <span class="claim-kind">Reserved compensation</span>
+              <strong id="pendingPreview">— / —</strong>
+              <p>Amounts reserved during a protected withdrawal.</p>
+              <button class="button claim-action" data-claim="pending" type="button">Claim compensation</button>
+            </article>
+            <article class="claim-card muted-card">
+              <span class="claim-kind">Manual simulation</span>
+              <label><span>Loss in token0</span><input id="lossValue" type="number" min="0" value="0" /></label>
+              <p>MVP flow based on a user-provided loss value.</p>
+              <button class="button claim-action" data-claim="manual" type="button">Manual claim</button>
+            </article>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel" id="settingsPanel">
+        <div class="panel-heading">
+          <div>
+            <p class="step">03 / CONNECTION</p>
+            <h2>Contract addresses</h2>
+          </div>
+          <span class="status-pill" id="chainIdLabel">Chain —</span>
+        </div>
+        <div class="grid two settings-grid">
+          <label>
+            <span>Official v4 PositionManager</span>
+            <input id="positionManager" placeholder="Selected automatically for the connected network" />
+          </label>
+          <label>
+            <span>Default SteadyLP hook</span>
+            <input id="defaultHook" placeholder="0x…" />
+          </label>
+        </div>
+        <div class="notice warning">
+          <span class="notice-icon">!</span>
+          <p>Always verify official deployment addresses before a mainnet transaction. Claims are sent to the connected wallet.</p>
+        </div>
+      </section>
+
+      <section class="architecture">
+        <div>
+          <p class="eyebrow">Architecture</p>
+          <h2>Who manages what?</h2>
+        </div>
+        <div class="architecture-grid">
+          <article><span>01</span><h3>Universal Router</h3><p>v4 swaps and multi-pool routing.</p></article>
+          <article><span>02</span><h3>PositionManager</h3><p>Pool initialization, liquidity changes, and NFT position collection.</p></article>
+          <article><span>03</span><h3>SteadyLP Hook</h3><p>Smoothed fees, reserve management, risk, and compensation.</p></article>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

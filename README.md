@@ -5,6 +5,15 @@ It smooths real swap fees over time and directs part of the value into a shared 
 When LPs face toxic flow, sudden price moves, or short-term JIT liquidity attacks, the hook can reduce abuse and partially compensate eligible long-term LPs.
 No fixed APY. No fake yield. No speculative hedging. Just real fees, transparent rules, and safer liquidity.
 
+## Web Console
+
+The static console in [`web/`](web/) lets a connected wallet initialize a new Uniswap v4 pool and preview or claim SteadyLP position rewards and compensation.
+
+```bash
+cd web
+python3 -m http.server 8080
+```
+
 ## How It Works Today
 
 1. Position and pool tracking
